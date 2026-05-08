@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body {
+    @apply bg-bg-0 text-ink antialiased;
+    font-family: 'Inter', system-ui, sans-serif;
+    font-feature-settings: 'cv11', 'ss01', 'ss03';
+  }
+
+  /* Hairline borders feel cleaner than card shadows in this aesthetic. */
+  .hairline {
+    @apply border border-line/80;
+  }
+
+  /* Tabular numerics for money + time labels. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
+
+  /* Focus ring matches brand. */
+  *:focus-visible {
+    @apply outline-none ring-2 ring-brand/60 ring-offset-2 ring-offset-bg-0;
+  }
+}
+
+@layer components {
+  .btn-brand {
+    @apply inline-flex items-center justify-center gap-2 rounded-md bg-brand px-4 py-2 text-sm font-medium text-bg-0 transition-colors hover:bg-brand-400 disabled:opacity-50 disabled:pointer-events-none;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-md border border-line/70 bg-bg-1 px-4 py-2 text-sm font-medium text-ink transition-colors hover:bg-bg-2;
+  }
+  .input-base {
+    @apply w-full rounded-md border border-line/80 bg-bg-1 px-3 py-2 text-sm text-ink placeholder:text-ink-mute focus:border-brand/60;
+  }
+  .card-base {
+    @apply rounded-lg border border-line/70 bg-bg-1;
+  }
+}
