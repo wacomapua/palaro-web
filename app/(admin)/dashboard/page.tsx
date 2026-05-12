@@ -42,7 +42,13 @@ export default async function DashboardPage() {
   const todayEnd = new Date(todayStart);
   todayEnd.setDate(todayEnd.getDate() + 1);
 
-  const { data: todayBookings } = await supabase
+  type TodayBookingRow = {
+    id: string;
+    status: string;
+    total_cents: number;
+    slot: { starts_at: string; ends_at: string; court: { name: string } | null } | null;
+  };
+  const { data: todayBookingsRaw } = await supabase
     .from('venue_bookings')
     .select(`
       id, status, total_cents,
@@ -53,6 +59,7 @@ export default async function DashboardPage() {
     .lt('slot.starts_at', todayEnd.toISOString())
     .order('created_at', { ascending: false })
     .limit(8);
+  const todayBookings = todayBookingsRaw as unknown as TodayBookingRow[] | null;
 
   return (
     <div className="px-8 py-8">

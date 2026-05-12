@@ -27,7 +27,7 @@ export type VenueBookingStatus =
   | 'completed';
 export type VenuePayoutStatus = 'pending' | 'paid' | 'failed';
 
-export interface Profile {
+export type Profile = {
   id: string;
   phone: string | null;
   email: string | null;
@@ -36,16 +36,16 @@ export interface Profile {
   created_at: string;
 }
 
-export interface RefundTier {
+export type RefundTier = {
   hours_before: number;
   refund_pct: number;
 }
 
-export interface RefundPolicy {
+export type RefundPolicy = {
   tiers: RefundTier[];
 }
 
-export interface PayoutMethod {
+export type PayoutMethod = {
   method: 'gcash' | 'bank';
   gcash_number?: string;
   bank_name?: string;
@@ -53,7 +53,7 @@ export interface PayoutMethod {
   account_name?: string;
 }
 
-export interface Venue {
+export type Venue = {
   id: string;
   slug: string;
   name: string;
@@ -74,7 +74,7 @@ export interface Venue {
   updated_at: string;
 }
 
-export interface VenueCourt {
+export type VenueCourt = {
   id: string;
   venue_id: string;
   parent_court_id: string | null;
@@ -87,7 +87,7 @@ export interface VenueCourt {
   created_at: string;
 }
 
-export interface VenueSlot {
+export type VenueSlot = {
   id: string;
   venue_id: string;
   court_id: string;
@@ -103,7 +103,7 @@ export interface VenueSlot {
   created_at: string;
 }
 
-export interface VenueBooking {
+export type VenueBooking = {
   id: string;
   slot_id: string;
   venue_id: string;
@@ -124,7 +124,7 @@ export interface VenueBooking {
   updated_at: string;
 }
 
-export interface VenuePayout {
+export type VenuePayout = {
   id: string;
   venue_id: string;
   period_start: string;
@@ -141,9 +141,9 @@ export interface VenuePayout {
 }
 
 type TableShape<R> = {
-  Row: R;
-  Insert: Record<string, unknown>;
-  Update: Record<string, unknown>;
+  Row: R & Record<string, unknown>;
+  Insert: Partial<R> & Record<string, unknown>;
+  Update: Partial<R> & Record<string, unknown>;
   Relationships: [];
 };
 

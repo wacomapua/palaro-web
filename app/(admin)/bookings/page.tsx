@@ -4,6 +4,15 @@ import { createClient } from '@/lib/supabase/server';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { formatMoney, formatDateTime } from '@/lib/format';
+import type { VenueBooking } from '@/lib/types/db';
+
+type BookingRow = Pick<
+  VenueBooking,
+  'id' | 'status' | 'total_cents' | 'payout_cents' | 'created_at'
+> & {
+  slot: { starts_at: string; ends_at: string; court: { name: string } | null } | null;
+  captain: { display_name: string | null; phone: string | null; email: string | null } | null;
+};
 
 export default async function BookingsPage() {
   const supabase = await createClient();
@@ -21,7 +30,7 @@ export default async function BookingsPage() {
     .maybeSingle();
   if (!venue) redirect('/onboarding/profile');
 
-  const { data: bookings } = await supabase
+  const { data: bookingsRaw } = await supabase
     .from('venue_bookings')
     .select(`
       id, status, total_cents, payout_cents, created_at,
@@ -31,6 +40,7 @@ export default async function BookingsPage() {
     .eq('venue_id', venue.id)
     .order('created_at', { ascending: false })
     .limit(100);
+  const bookings = bookingsRaw as unknown as BookingRow[] | null;
 
   return (
     <div className="px-8 py-8">

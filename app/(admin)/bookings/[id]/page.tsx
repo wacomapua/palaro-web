@@ -7,7 +7,18 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { formatMoney, formatDateTime } from '@/lib/format';
 import { computeRefund, formatRefundPolicy, DEFAULT_REFUND_POLICY } from '@/lib/refund';
-import type { RefundPolicy } from '@/lib/types/db';
+import type { RefundPolicy, VenueBooking } from '@/lib/types/db';
+
+type BookingWithJoins = VenueBooking & {
+  venue: { name: string; currency: string; default_refund_policy: RefundPolicy } | null;
+  slot: {
+    starts_at: string;
+    ends_at: string;
+    refund_policy: RefundPolicy | null;
+    court: { name: string } | null;
+  } | null;
+  captain: { display_name: string | null; phone: string | null; email: string | null } | null;
+};
 
 export default async function BookingDetail({
   params,
@@ -21,7 +32,7 @@ export default async function BookingDetail({
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const { data: booking } = await supabase
+  const { data: bookingRaw } = await supabase
     .from('venue_bookings')
     .select(`
       *,
@@ -32,14 +43,14 @@ export default async function BookingDetail({
     .eq('id', id)
     .maybeSingle();
 
-  if (!booking) notFound();
+  const booking = bookingRaw as unknown as BookingWithJoins | null;
+  if (!booking || !booking.venue || !booking.slot || !booking.slot.court || !booking.captain) {
+    notFound();
+  }
 
-  // deno-lint-ignore no-explicit-any
-  const venue = (booking as any).venue as { name: string; currency: string; default_refund_policy: RefundPolicy };
-  // deno-lint-ignore no-explicit-any
-  const slot = (booking as any).slot as { starts_at: string; ends_at: string; refund_policy: RefundPolicy | null; court: { name: string } };
-  // deno-lint-ignore no-explicit-any
-  const captain = (booking as any).captain as { display_name: string | null; phone: string | null; email: string | null };
+  const venue = booking.venue;
+  const slot = { ...booking.slot, court: booking.slot.court };
+  const captain = booking.captain;
 
   const policy = slot.refund_policy ?? venue.default_refund_policy ?? DEFAULT_REFUND_POLICY;
   const refund = computeRefund(booking.total_cents, slot.starts_at, policy);

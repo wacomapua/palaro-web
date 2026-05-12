@@ -32,13 +32,13 @@ export default async function CalendarPage({
 
   const { data: courts } = await supabase
     .from('venue_courts')
-    .select('id, name, kind, parent_court_id, sort_order, capacity')
+    .select('*')
     .eq('venue_id', venue.id)
     .order('sort_order');
 
   const { data: slots } = await supabase
     .from('venue_slots')
-    .select('id, court_id, starts_at, ends_at, price_cents, status, currency, held_until')
+    .select('*')
     .eq('venue_id', venue.id)
     .gte('starts_at', dayStart.toISOString())
     .lt('starts_at', dayEnd.toISOString())

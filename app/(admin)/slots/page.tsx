@@ -23,7 +23,15 @@ export default async function SlotsPage() {
   if (!venue) redirect('/onboarding/profile');
 
   const now = new Date().toISOString();
-  const { data: slots } = await supabase
+  type SlotRow = {
+    id: string;
+    starts_at: string;
+    ends_at: string;
+    price_cents: number;
+    status: 'available' | 'held' | 'booked' | 'cancelled' | 'closed';
+    court: { name: string } | null;
+  };
+  const { data: slotsRaw } = await supabase
     .from('venue_slots')
     .select(`
       id, starts_at, ends_at, price_cents, status,
@@ -33,6 +41,7 @@ export default async function SlotsPage() {
     .gte('starts_at', now)
     .order('starts_at')
     .limit(50);
+  const slots = slotsRaw as unknown as SlotRow[] | null;
 
   return (
     <div className="px-8 py-8">
