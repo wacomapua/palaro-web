@@ -24,10 +24,10 @@ export function LoginForm({
 
     const supabase = createClient();
     const next = params.next ?? '/dashboard';
-    // emailRedirectTo is the URL the user lands on AFTER /auth/confirm
-    // verifies the token. Don't point it back at /auth/callback — that just
-    // triggers a second verify with no token and bounces to /login.
-    const redirectTo = `${window.location.origin}${next}`;
+    // PKCE flow: Supabase appends ?code=… to redirect_to. We must land on
+    // /auth/callback so the route can exchangeCodeForSession before routing
+    // the user on to `next`.
+    const redirectTo = `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}`;
 
     const { error: signInErr } = await supabase.auth.signInWithOtp({
       email,
