@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { EmailOtpType } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/server';
+import { publicOrigin } from '@/lib/public-origin';
 
 // Handles BOTH Supabase auth-link styles:
 //   - OAuth / PKCE:        ?code=…
@@ -8,15 +9,9 @@ import { createClient } from '@/lib/supabase/server';
 // Default email templates use the OTP form; OAuth providers use the code form.
 // We accept either so the same redirect URL works for both.
 export async function GET(request: Request) {
-  const url = new URL(request.url);
-  const { searchParams } = url;
-  // Behind a proxy (Railway/Vercel), request.url's host is the internal bind
-  // address (e.g. localhost:8080), so url.origin would redirect users there.
-  // Derive the public origin from the proxy's forwarded headers; fall back to
-  // url.origin for local dev where there is no proxy.
-  const forwardedHost = request.headers.get('x-forwarded-host');
-  const forwardedProto = request.headers.get('x-forwarded-proto') ?? url.protocol.replace(':', '');
-  const origin = forwardedHost ? `${forwardedProto}://${forwardedHost}` : url.origin;
+  const { searchParams } = new URL(request.url);
+  // Public origin, not the internal proxy bind address — see publicOrigin().
+  const origin = publicOrigin(request);
   const code = searchParams.get('code');
   const tokenHash = searchParams.get('token_hash');
   const type = searchParams.get('type') as EmailOtpType | null;
