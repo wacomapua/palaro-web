@@ -8,8 +8,11 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/cn';
 import { formatMoney, formatDate } from '@/lib/format';
+import { SPORT_CONFIGS } from '@/lib/sport-presets';
 import type { VenueCourt, VenueSlot, VenueSlotStatus } from '@/lib/types/db';
 import { SlotEditSheet } from './slot-edit-sheet';
+
+const SPORT_EMOJI = Object.fromEntries(SPORT_CONFIGS.map((c) => [c.sport, c.emoji]));
 
 const HOUR_PX = 64;
 const ROW_PX = 56;
@@ -19,6 +22,7 @@ interface BookingShape {
   id: string;
   slot_id: string;
   status: string;
+  party_size: number;
   captain: { display_name: string | null; avatar_url: string | null } | null;
 }
 
@@ -51,9 +55,14 @@ export function CourtCalendar({
     return m;
   }, [slots]);
 
+  // A shared (golf) slot can hold several bookings, so map slot → list.
   const bookingsBySlot = useMemo(() => {
-    const m = new Map<string, BookingShape>();
-    for (const b of bookings) m.set(b.slot_id, b);
+    const m = new Map<string, BookingShape[]>();
+    for (const b of bookings) {
+      const arr = m.get(b.slot_id) ?? [];
+      arr.push(b);
+      m.set(b.slot_id, arr);
+    }
     return m;
   }, [bookings]);
 
@@ -145,6 +154,11 @@ export function CourtCalendar({
                         )}
                       />
                     )}
+                    {row.depth === 0 && SPORT_EMOJI[row.node.sport] && (
+                      <span className="leading-none" title={row.node.sport}>
+                        {SPORT_EMOJI[row.node.sport]}
+                      </span>
+                    )}
                     <span className="truncate text-ink">{row.node.name}</span>
                   </div>
                   {/* When collapsed, show inline mini-grid of children's status — the screenshot-worthy detail */}
@@ -188,7 +202,7 @@ export function CourtCalendar({
                     <SlotBlock
                       key={s.id}
                       slot={s}
-                      booking={bookingsBySlot.get(s.id)}
+                      bookings={bookingsBySlot.get(s.id) ?? []}
                       currency={venue.currency}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -223,8 +237,8 @@ export function CourtCalendar({
           existingSlot={
             editing.kind === 'edit' ? slots.find((s) => s.id === editing.slotId) ?? null : null
           }
-          existingBooking={
-            editing.kind === 'edit' ? bookingsBySlot.get(editing.slotId) ?? null : null
+          existingBookings={
+            editing.kind === 'edit' ? bookingsBySlot.get(editing.slotId) ?? [] : []
           }
           currency={venue.currency}
           onClose={() => setEditing(null)}
@@ -240,12 +254,12 @@ export function CourtCalendar({
 
 function SlotBlock({
   slot,
-  booking,
+  bookings,
   currency,
   onClick,
 }: {
   slot: VenueSlot;
-  booking?: BookingShape;
+  bookings: BookingShape[];
   currency: string;
   onClick: (e: React.MouseEvent) => void;
 }) {
@@ -255,27 +269,48 @@ function SlotBlock({
   const left = ((start.getHours() + start.getMinutes() / 60) - baseHour) * HOUR_PX;
   const width = ((end.getTime() - start.getTime()) / 3_600_000) * HOUR_PX;
 
-  const colors = colorForStatus(slot.status);
+  const shared = slot.booking_mode === 'shared';
+  const perPlayer = slot.pricing_mode === 'per_player';
+  const priceCents = perPlayer ? slot.price_per_player_cents ?? slot.price_cents : slot.price_cents;
+  const booked = bookings.reduce((s, b) => s + (b.party_size ?? 1), 0);
+
+  // A shared tee time fills up gradually; show it as booked once anyone is on it.
+  const effectiveStatus =
+    shared && booked > 0 && booked >= (slot.max_players ?? Infinity)
+      ? 'booked'
+      : shared && booked > 0
+        ? 'held'
+        : slot.status;
+  const colors = colorForStatus(effectiveStatus as VenueSlotStatus);
+
+  const label = shared
+    ? `${booked}/${slot.max_players ?? '?'}`
+    : bookings[0]?.captain?.display_name ?? slot.status;
+
+  // Tee times are short and pack tightly; let them shrink more than court slots.
+  const minWidth = shared ? 18 : 28;
 
   return (
     <button
       onClick={onClick}
       className={cn(
-        'absolute top-1 bottom-1 rounded-md border px-2 py-1 text-left text-[11px] transition-colors',
+        'absolute top-1 bottom-1 rounded-md border px-1.5 py-1 text-left text-[11px] transition-colors',
         colors.bg,
         colors.border,
         colors.text,
       )}
-      style={{ left, width: Math.max(width - 4, 28) }}
-      title={`${slot.status} · ${formatMoney(slot.price_cents, currency)}`}
+      style={{ left, width: Math.max(width - 4, minWidth) }}
+      title={`${start.getHours()}:${start.getMinutes().toString().padStart(2, '0')} · ${
+        shared ? `${booked}/${slot.max_players} players` : slot.status
+      } · ${formatMoney(priceCents, currency)}${perPlayer ? '/player' : ''}`}
     >
       <div className="flex items-center justify-between gap-1">
-        <span className="truncate font-medium">
-          {booking?.captain?.display_name ?? slot.status}
-        </span>
-        <span className="font-mono tnum text-[10px] opacity-90">
-          {formatMoney(slot.price_cents, currency)}
-        </span>
+        <span className="truncate font-medium">{label}</span>
+        {!shared && (
+          <span className="font-mono tnum text-[10px] opacity-90">
+            {formatMoney(priceCents, currency)}
+          </span>
+        )}
       </div>
       <div className="text-[10px] opacity-80 font-mono">
         {start.getHours()}:{start.getMinutes().toString().padStart(2, '0')}

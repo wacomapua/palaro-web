@@ -19,6 +19,17 @@ export default async function CourtsStep() {
 
   if (!venue) redirect('/onboarding/venue');
 
+  const { data: offered } = await supabase
+    .from('venue_sports')
+    .select('sport')
+    .eq('venue_id', venue.id)
+    .eq('active', true);
+  // Primary sport first, then any other offered sports.
+  const sports = [
+    venue.sport,
+    ...(offered ?? []).map((o) => o.sport).filter((s) => s !== venue.sport),
+  ];
+
   const { data: existingCourts } = await supabase
     .from('venue_courts')
     .select('id, name, kind, parent_court_id, sort_order')
@@ -35,7 +46,7 @@ export default async function CourtsStep() {
       <div className="mt-6">
         <CourtsBuilder
           venueId={venue.id}
-          venueSport={venue.sport}
+          sports={sports}
           existingCourts={existingCourts ?? []}
         />
       </div>

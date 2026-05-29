@@ -11,6 +11,7 @@ import { createClient } from '@/lib/supabase/client';
 import {
   SPORT_CONFIGS,
   materialisePreset,
+  slotModelForPreset,
   type CourtPreset,
   type PresetNode,
 } from '@/lib/sport-presets';
@@ -26,43 +27,63 @@ interface ExistingCourt {
 
 type DraftNode = PresetNode;
 
+interface SportDraft {
+  presetId: string;
+  count: number;
+  draft: DraftNode[];
+}
+
+function initialDraftFor(sport: VenueSport): SportDraft {
+  const cfg = SPORT_CONFIGS.find((c) => c.sport === sport)!;
+  const preset = cfg.presets[0];
+  const count = preset.variableCount?.default ?? 1;
+  return { presetId: preset.id, count, draft: materialisePreset(preset, count) };
+}
+
 export function CourtsBuilder({
   venueId,
-  venueSport,
+  sports,
   existingCourts,
 }: {
   venueId: string;
-  venueSport: VenueSport;
+  sports: VenueSport[];
   existingCourts: ExistingCourt[];
 }) {
   const router = useRouter();
-  const sportConfig = SPORT_CONFIGS.find((c) => c.sport === venueSport)!;
-  const [presetId, setPresetId] = useState<string>(sportConfig.presets[0].id);
-  const preset = sportConfig.presets.find((p) => p.id === presetId)!;
-  const [count, setCount] = useState<number>(preset.variableCount?.default ?? 1);
-  const [draft, setDraft] = useState<DraftNode[]>(() => materialisePreset(preset, count));
+  const [activeSport, setActiveSport] = useState<VenueSport>(sports[0]);
+  const [drafts, setDrafts] = useState<Record<string, SportDraft>>(() =>
+    Object.fromEntries(sports.map((s) => [s, initialDraftFor(s)])),
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const alreadySetUp = existingCourts.length > 0;
 
+  const sportConfig = SPORT_CONFIGS.find((c) => c.sport === activeSport)!;
+  const current = drafts[activeSport];
+  const preset = sportConfig.presets.find((p) => p.id === current.presetId)!;
+
+  function patchActive(patch: Partial<SportDraft>) {
+    setDrafts((d) => ({ ...d, [activeSport]: { ...d[activeSport], ...patch } }));
+  }
+
   function selectPreset(p: CourtPreset) {
-    setPresetId(p.id);
     const c = p.variableCount?.default ?? 1;
-    setCount(c);
-    setDraft(materialisePreset(p, c));
+    patchActive({ presetId: p.id, count: c, draft: materialisePreset(p, c) });
   }
 
   function setCountAndRegenerate(n: number) {
-    setCount(n);
-    setDraft(materialisePreset(preset, n));
+    patchActive({ count: n, draft: materialisePreset(preset, n) });
   }
 
   function renameNode(key: string, name: string) {
-    setDraft((d) => d.map((n) => (n.key === key ? { ...n, name } : n)));
+    patchActive({ draft: current.draft.map((n) => (n.key === key ? { ...n, name } : n)) });
   }
 
-  // Group nodes into a renderable tree (root → children).
-  const tree = useMemo(() => buildTree(draft), [draft]);
+  const tree = useMemo(() => buildTree(current.draft), [current.draft]);
+  const totalCourts = useMemo(
+    () => sports.reduce((sum, s) => sum + drafts[s].draft.length, 0),
+    [sports, drafts],
+  );
 
   async function commit() {
     if (alreadySetUp) {
@@ -73,66 +94,63 @@ export function CourtsBuilder({
     setError(null);
 
     const supabase = createClient();
+    let sortOrder = 0;
 
-    // Insert pass 1: all roots (parent_court_id = null) so we can map keys → ids.
-    const keyToId: Record<string, string> = {};
-    const roots = draft.filter((n) => !n.parentKey);
+    // Insert sport by sport so courts stay grouped, parents before children.
+    for (const sport of sports) {
+      const sportCfg = SPORT_CONFIGS.find((c) => c.sport === sport)!;
+      const { draft, presetId } = drafts[sport];
+      const sportPreset = sportCfg.presets.find((p) => p.id === presetId)!;
+      const slotModel = slotModelForPreset(sportPreset);
+      const keyToId: Record<string, string> = {};
 
-    for (let i = 0; i < roots.length; i++) {
-      const n = roots[i];
-      const { data, error: insErr } = await supabase
-        .from('venue_courts')
-        .insert({
-          venue_id: venueId,
-          parent_court_id: null,
-          name: n.name,
-          kind: n.kind,
-          sort_order: i,
-        })
-        .select('id')
-        .single();
-      if (insErr || !data) {
-        setError(insErr?.message ?? 'Failed to create court');
-        setSubmitting(false);
-        return;
-      }
-      keyToId[n.key] = data.id as string;
-    }
-
-    // Insert pass 2: children, breadth-first, until all done. Multiple passes
-    // handle deeper trees (e.g. Football full → halves → quarters).
-    let remaining = draft.filter((n) => n.parentKey);
-    let pass = 0;
-    while (remaining.length > 0 && pass < 5) {
-      const insertable = remaining.filter((n) => keyToId[n.parentKey!]);
-      for (let i = 0; i < insertable.length; i++) {
-        const n = insertable[i];
+      async function insertNode(n: DraftNode, parentId: string | null) {
         const { data, error: insErr } = await supabase
           .from('venue_courts')
           .insert({
             venue_id: venueId,
-            parent_court_id: keyToId[n.parentKey!],
+            parent_court_id: parentId,
+            sport,
             name: n.name,
             kind: n.kind,
-            sort_order: i,
+            capacity: n.capacity ?? null,
+            sort_order: sortOrder++,
+            metadata: { slotModel } as unknown as import('@/lib/types/db').Json,
           })
           .select('id')
           .single();
         if (insErr || !data) {
-          setError(insErr?.message ?? 'Failed to create child court');
-          setSubmitting(false);
-          return;
+          throw new Error(insErr?.message ?? 'Failed to create court');
         }
         keyToId[n.key] = data.id as string;
       }
-      remaining = remaining.filter((n) => !keyToId[n.key]);
-      pass++;
-    }
 
-    if (remaining.length > 0) {
-      setError(`Could not place ${remaining.length} court(s) — parent reference missing`);
-      setSubmitting(false);
-      return;
+      try {
+        // Roots first.
+        for (const n of draft.filter((x) => !x.parentKey)) {
+          await insertNode(n, null);
+        }
+        // Then descendants, breadth-first across a few passes for deep trees.
+        let remaining = draft.filter((x) => x.parentKey);
+        let pass = 0;
+        while (remaining.length > 0 && pass < 5) {
+          const insertable = remaining.filter((n) => keyToId[n.parentKey!]);
+          for (const n of insertable) {
+            await insertNode(n, keyToId[n.parentKey!]);
+          }
+          remaining = remaining.filter((n) => !keyToId[n.key]);
+          pass++;
+        }
+        if (remaining.length > 0) {
+          throw new Error(
+            `Could not place ${remaining.length} ${sport} court(s) — parent reference missing`,
+          );
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Failed to create courts');
+        setSubmitting(false);
+        return;
+      }
     }
 
     router.push('/onboarding/payout');
@@ -155,23 +173,50 @@ export function CourtsBuilder({
     );
   }
 
+  const isTeeSheet = !!preset.teeIntervalMinutes;
+
   return (
     <div className="space-y-6">
+      {/* Sport tabs — only when the venue runs more than one sport */}
+      {sports.length > 1 && (
+        <div className="flex flex-wrap gap-2">
+          {sports.map((s) => {
+            const cfg = SPORT_CONFIGS.find((c) => c.sport === s)!;
+            const active = s === activeSport;
+            const n = drafts[s].draft.length;
+            return (
+              <button
+                type="button"
+                key={s}
+                onClick={() => setActiveSport(s)}
+                className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-2 text-sm transition-colors ${
+                  active
+                    ? 'border-brand bg-brand/10 text-brand'
+                    : 'border-line/70 bg-bg-1 text-ink-dim hover:border-line'
+                }`}
+              >
+                <span>{cfg.emoji}</span>
+                {cfg.label}
+                <Badge tone="neutral" className="ml-1 font-mono">{n}</Badge>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* Preset picker */}
       <div className="space-y-3">
-        <Label>Pick a layout</Label>
+        <Label>Pick a layout for {sportConfig.label}</Label>
         <div className="grid gap-3">
           {sportConfig.presets.map((p) => {
-            const active = p.id === presetId;
+            const active = p.id === current.presetId;
             return (
               <button
                 type="button"
                 key={p.id}
                 onClick={() => selectPreset(p)}
                 className={`text-left rounded-lg border p-4 transition-colors ${
-                  active
-                    ? 'border-brand bg-brand/5'
-                    : 'border-line/70 bg-bg-1 hover:border-line'
+                  active ? 'border-brand bg-brand/5' : 'border-line/70 bg-bg-1 hover:border-line'
                 }`}
               >
                 <div className="flex items-center justify-between">
@@ -192,7 +237,7 @@ export function CourtsBuilder({
             type="number"
             min={preset.variableCount.min}
             max={preset.variableCount.max}
-            value={count}
+            value={current.count}
             onChange={(e) => setCountAndRegenerate(Number(e.target.value) || 1)}
             className="w-32"
           />
@@ -202,8 +247,12 @@ export function CourtsBuilder({
       {/* Tree preview */}
       <div className="card-base p-5">
         <div className="mb-3 flex items-center justify-between text-xs text-ink-dim">
-          <span>{draft.length} courts will be created</span>
-          <span className="font-mono">Default {preset.defaultDurationMinutes} min slots</span>
+          <span>{current.draft.length} {sportConfig.label} courts will be created</span>
+          <span className="font-mono">
+            {isTeeSheet
+              ? `Tee times · every ${preset.teeIntervalMinutes} min · up to ${preset.maxPlayers} players`
+              : `Default ${preset.defaultDurationMinutes} min slots`}
+          </span>
         </div>
 
         {/* Column header */}
@@ -219,20 +268,26 @@ export function CourtsBuilder({
         </ul>
 
         <p className="mt-3 text-[11px] text-ink-mute">
-          Booking a parent locks its children — if a captain books the Full Pitch,
-          the halves and quarters become unavailable for that timeblock.
+          {isTeeSheet
+            ? 'Golf tee times are shared: up to a foursome books each time, priced per golfer. You generate the tee sheet from the calendar.'
+            : 'Booking a parent locks its children — if a captain books the Full Pitch, the halves and quarters become unavailable for that timeblock.'}
         </p>
       </div>
 
       {error && <p className="text-xs text-danger">{error}</p>}
 
-      <div className="flex justify-between">
+      <div className="flex items-center justify-between">
         <Button variant="ghost" onClick={() => router.push('/onboarding/venue')}>
           Back
         </Button>
-        <Button onClick={commit} disabled={submitting || draft.length === 0}>
-          {submitting ? 'Creating courts…' : 'Save courts & continue'}
-        </Button>
+        <div className="flex items-center gap-3">
+          {sports.length > 1 && (
+            <span className="text-xs text-ink-mute">{totalCourts} courts total</span>
+          )}
+          <Button onClick={commit} disabled={submitting || totalCourts === 0}>
+            {submitting ? 'Creating courts…' : 'Save courts & continue'}
+          </Button>
+        </div>
       </div>
     </div>
   );
