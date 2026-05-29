@@ -17,6 +17,17 @@ export default async function VenueStep() {
     .limit(1)
     .maybeSingle();
 
+  let sports = venue ? [venue.sport] : undefined;
+  if (venue) {
+    const { data: offered } = await supabase
+      .from('venue_sports')
+      .select('sport')
+      .eq('venue_id', venue.id)
+      .eq('active', true);
+    const extras = (offered ?? []).map((o) => o.sport).filter((s) => s !== venue.sport);
+    sports = [venue.sport, ...extras];
+  }
+
   return (
     <section>
       <h1 className="text-2xl font-medium tracking-tight">Tell us about your venue</h1>
@@ -31,6 +42,7 @@ export default async function VenueStep() {
                   id: venue.id,
                   name: venue.name,
                   sport: venue.sport,
+                  sports,
                   address: venue.address,
                   city: venue.city ?? '',
                   phone: venue.phone ?? '',

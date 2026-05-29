@@ -94,6 +94,7 @@ export default async function BookingDetail({
           <CardContent className="grid gap-2 text-sm">
             <Row label="Venue" value={venue.name} />
             <Row label="Court" value={slot.court.name} />
+            <Row label="Players" value={String(booking.party_size ?? 1)} />
             <Row label="Start" value={formatDateTime(slot.starts_at)} />
             <Row label="End" value={formatDateTime(slot.ends_at)} />
           </CardContent>

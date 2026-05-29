@@ -8,7 +8,7 @@ import type { VenueBooking } from '@/lib/types/db';
 
 type BookingRow = Pick<
   VenueBooking,
-  'id' | 'status' | 'total_cents' | 'payout_cents' | 'created_at'
+  'id' | 'status' | 'total_cents' | 'payout_cents' | 'created_at' | 'party_size'
 > & {
   slot: { starts_at: string; ends_at: string; court: { name: string } | null } | null;
   captain: { display_name: string | null; phone: string | null; email: string | null } | null;
@@ -33,7 +33,7 @@ export default async function BookingsPage() {
   const { data: bookingsRaw } = await supabase
     .from('venue_bookings')
     .select(`
-      id, status, total_cents, payout_cents, created_at,
+      id, status, total_cents, payout_cents, created_at, party_size,
       slot:venue_slots(starts_at, ends_at, court:venue_courts(name)),
       captain:profiles!captain_user_id(display_name, phone, email)
     `)
@@ -62,6 +62,7 @@ export default async function BookingsPage() {
                   <th className="py-2">When played</th>
                   <th>Court</th>
                   <th>Captain</th>
+                  <th className="text-right">Players</th>
                   <th className="text-right">Total</th>
                   <th className="text-right">Your cut</th>
                   <th className="text-right">Status</th>
@@ -87,6 +88,7 @@ export default async function BookingsPage() {
                         {(b as any).captain?.display_name ?? '—'}
                       </Link>
                     </td>
+                    <td className="text-right font-mono tnum text-ink-dim">{b.party_size ?? 1}</td>
                     <td className="text-right font-mono tnum">
                       {formatMoney(b.total_cents, venue.currency)}
                     </td>

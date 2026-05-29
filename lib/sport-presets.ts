@@ -3,7 +3,7 @@
 // starting point. After picking, they can rename / reorder / set capacity
 // before commit.
 
-import type { VenueSport } from '@/lib/types/db';
+import type { VenueSport, BookingMode, PricingMode } from '@/lib/types/db';
 
 export interface PresetNode {
   // Stable id within the preset so we can reference parent in children.
@@ -11,7 +11,7 @@ export interface PresetNode {
   name: string;
   // Free-text kind that becomes venue_courts.kind. Drives some UI hints
   // (e.g. half-pitch icon vs quarter icon) but isn't enum-checked.
-  kind: 'pitch' | 'half' | 'quarter' | 'court' | 'derived';
+  kind: 'pitch' | 'half' | 'quarter' | 'court' | 'derived' | 'course' | 'lane';
   capacity?: number;
   parentKey?: string; // null = root
 }
@@ -24,6 +24,37 @@ export interface CourtPreset {
   nodes: PresetNode[];
   // For "N courts" presets: prompt the user for N before generating nodes.
   variableCount?: { min: number; max: number; default: number; namePattern: string };
+  // Booking model — defaults to exclusive / per_slot (i.e. "rent the whole
+  // court for one block"). Golf-style presets set bookingMode 'shared' with a
+  // tee interval so a single tee time holds several independent parties.
+  bookingMode?: BookingMode;
+  pricingMode?: PricingMode;
+  // Minutes between consecutive slots when bulk-generating. Presence of a
+  // teeIntervalMinutes signals a tee-sheet (golf): many short slots back to back.
+  teeIntervalMinutes?: number;
+  // Max players across all bookings of one shared slot (a golf foursome = 4).
+  maxPlayers?: number;
+}
+
+// The slot-generation model derived from a preset and stored on
+// venue_courts.metadata so the calendar knows how to create slots for a court
+// without re-deriving it from the sport every time.
+export interface CourtSlotModel {
+  bookingMode: BookingMode;
+  pricingMode: PricingMode;
+  defaultDurationMinutes: number;
+  teeIntervalMinutes?: number;
+  maxPlayers?: number;
+}
+
+export function slotModelForPreset(preset: CourtPreset): CourtSlotModel {
+  return {
+    bookingMode: preset.bookingMode ?? 'exclusive',
+    pricingMode: preset.pricingMode ?? 'per_slot',
+    defaultDurationMinutes: preset.defaultDurationMinutes,
+    teeIntervalMinutes: preset.teeIntervalMinutes,
+    maxPlayers: preset.maxPlayers,
+  };
 }
 
 export interface SportConfig {
@@ -149,6 +180,100 @@ export const SPORT_CONFIGS: SportConfig[] = [
         defaultDurationMinutes: 120,
         nodes: [],
         variableCount: { min: 1, max: 12, default: 2, namePattern: 'Court {n}' },
+      },
+    ],
+  },
+  {
+    sport: 'golf',
+    emoji: '⛳',
+    label: 'Golf',
+    presets: [
+      {
+        id: 'golf-18',
+        label: '18-hole course',
+        description:
+          'One course. Players book tee times in groups of up to 4 — a tee sheet, spaced every few minutes, paid per golfer.',
+        defaultDurationMinutes: 10,
+        bookingMode: 'shared',
+        pricingMode: 'per_player',
+        teeIntervalMinutes: 10,
+        maxPlayers: 4,
+        nodes: [{ key: 'course', name: '18-Hole Course', kind: 'course', capacity: 4 }],
+      },
+      {
+        id: 'golf-front-back',
+        label: 'Front 9 + Back 9',
+        description:
+          'Two nine-hole loops bookable independently. Each has its own tee sheet of foursomes.',
+        defaultDurationMinutes: 10,
+        bookingMode: 'shared',
+        pricingMode: 'per_player',
+        teeIntervalMinutes: 10,
+        maxPlayers: 4,
+        nodes: [
+          { key: 'front', name: 'Front 9', kind: 'course', capacity: 4 },
+          { key: 'back', name: 'Back 9', kind: 'course', capacity: 4 },
+        ],
+      },
+      {
+        id: 'golf-range',
+        label: 'Driving range bays',
+        description: 'Independent practice bays, booked per bay for a time block.',
+        defaultDurationMinutes: 60,
+        nodes: [],
+        variableCount: { min: 1, max: 60, default: 20, namePattern: 'Bay {n}' },
+      },
+    ],
+  },
+  {
+    sport: 'badminton',
+    emoji: '🏸',
+    label: 'Badminton',
+    presets: [
+      {
+        id: 'badminton-flat',
+        label: 'N courts',
+        description: 'Independent badminton courts.',
+        defaultDurationMinutes: 60,
+        nodes: [],
+        variableCount: { min: 1, max: 24, default: 4, namePattern: 'Court {n}' },
+      },
+    ],
+  },
+  {
+    sport: 'swimming',
+    emoji: '🏊',
+    label: 'Swimming',
+    presets: [
+      {
+        id: 'swimming-lanes',
+        label: 'N lap lanes',
+        description: 'Independent lap lanes, booked per lane for a time block.',
+        defaultDurationMinutes: 60,
+        nodes: [],
+        variableCount: { min: 1, max: 16, default: 6, namePattern: 'Lane {n}' },
+      },
+      {
+        id: 'swimming-pool',
+        label: 'Whole pool',
+        description: 'Reserve the entire pool as one resource.',
+        defaultDurationMinutes: 60,
+        nodes: [{ key: 'pool', name: 'Pool', kind: 'court', capacity: 30 }],
+      },
+    ],
+  },
+  {
+    sport: 'squash',
+    emoji: '🟦',
+    label: 'Squash',
+    presets: [
+      {
+        id: 'squash-flat',
+        label: 'N courts',
+        description: 'Independent squash courts.',
+        defaultDurationMinutes: 45,
+        nodes: [],
+        variableCount: { min: 1, max: 16, default: 4, namePattern: 'Court {n}' },
       },
     ],
   },

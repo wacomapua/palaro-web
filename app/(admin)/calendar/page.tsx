@@ -46,7 +46,7 @@ export default async function CalendarPage({
 
   const { data: bookings } = await supabase
     .from('venue_bookings')
-    .select('id, slot_id, captain_user_id, team_id, status, captain:profiles!captain_user_id(display_name, avatar_url)')
+    .select('id, slot_id, captain_user_id, team_id, status, party_size, captain:profiles!captain_user_id(display_name, avatar_url)')
     .eq('venue_id', venue.id)
     .in('status', ['paid', 'pending_payment', 'completed'])
     .in(

@@ -18,6 +18,16 @@ export default async function VenueSettings() {
     .maybeSingle();
   if (!venue) redirect('/onboarding/profile');
 
+  const { data: offered } = await supabase
+    .from('venue_sports')
+    .select('sport')
+    .eq('venue_id', venue.id)
+    .eq('active', true);
+  const sports = [
+    venue.sport,
+    ...(offered ?? []).map((o) => o.sport).filter((s) => s !== venue.sport),
+  ];
+
   return (
     <div className="px-8 py-8 max-w-2xl">
       <h1 className="text-3xl font-medium tracking-tight">Venue settings</h1>
@@ -29,6 +39,7 @@ export default async function VenueSettings() {
             id: venue.id,
             name: venue.name,
             sport: venue.sport,
+            sports,
             address: venue.address,
             city: venue.city ?? '',
             phone: venue.phone ?? '',
