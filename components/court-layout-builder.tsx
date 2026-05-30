@@ -107,19 +107,18 @@ export function CourtLayoutBuilder({
   }
 
   function setCount(instId: string, n: number) {
-    setLayouts((m) => {
-      const list = m[activeSport];
-      const dupIndex = list.filter((x) => x.presetId === list.find((y) => y.id === instId)!.presetId)
-        .findIndex((x) => x.id === instId);
-      return {
-        ...m,
-        [activeSport]: list.map((l) => {
-          if (l.id !== instId) return l;
-          const preset = sportConfig.presets.find((p) => p.id === l.presetId)!;
-          return buildInstance(l.id, preset, Math.max(0, dupIndex), Math.max(1, n));
-        }),
-      };
-    });
+    setLayouts((m) => ({
+      ...m,
+      [activeSport]: m[activeSport].map((l) => {
+        if (l.id !== instId) return l;
+        const preset = sportConfig.presets.find((p) => p.id === l.presetId)!;
+        // Rebuild for the new quantity but keep any names the user already typed
+        // (matched by position); dupIndex 0 so we don't re-apply the " N" suffix.
+        const fresh = buildInstance(l.id, preset, 0, Math.max(1, n));
+        const nodes = fresh.nodes.map((nd, i) => (l.nodes[i] ? { ...nd, name: l.nodes[i].name } : nd));
+        return { ...fresh, nodes };
+      }),
+    }));
   }
 
   function renameNode(instId: string, key: string, name: string) {
@@ -154,9 +153,29 @@ export function CourtLayoutBuilder({
           const preset = SPORT_CONFIGS.find((c) => c.sport === sport)!.presets.find(
             (p) => p.id === inst.presetId,
           )!;
-          const slotModel = slotModelForPreset(preset);
-          const keyToId: Record<string, string> = {};
+          const meta = { slotModel: slotModelForPreset(preset) } as unknown as Json;
 
+          // Flat layout (no parent/child, e.g. N courts / lanes / driving-range
+          // bays) → one atomic batch insert instead of N round-trips.
+          if (!inst.nodes.some((n) => n.parentKey)) {
+            const rows = inst.nodes.map((n) => ({
+              venue_id: venueId,
+              parent_court_id: null,
+              sport,
+              name: n.name,
+              kind: n.kind,
+              capacity: n.capacity ?? null,
+              sort_order: sortOrder++,
+              metadata: meta,
+            }));
+            const { error: e } = await supabase.from('venue_courts').insert(rows);
+            if (e) throw new Error(e.message);
+            continue;
+          }
+
+          // Tree layout (e.g. full pitch → halves → quarters) → insert roots,
+          // then descendants breadth-first, mapping each parent's new id.
+          const keyToId: Record<string, string> = {};
           const insertNode = async (n: PresetNode, parentId: string | null) => {
             const { data, error: e } = await supabase
               .from('venue_courts')
@@ -168,7 +187,7 @@ export function CourtLayoutBuilder({
                 kind: n.kind,
                 capacity: n.capacity ?? null,
                 sort_order: sortOrder++,
-                metadata: { slotModel } as unknown as Json,
+                metadata: meta,
               })
               .select('id')
               .single();

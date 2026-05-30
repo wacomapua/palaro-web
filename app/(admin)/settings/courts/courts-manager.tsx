@@ -65,6 +65,15 @@ export function CourtsManager({
     return map;
   }, [courts]);
 
+  // Show every sport that actually has courts — offered ones first (in order),
+  // then any whose offering was turned off but still has courts (so they stay
+  // manageable instead of being stranded/hidden).
+  const displaySports = useMemo(() => {
+    const offered = sports.filter((s) => bySport.has(s));
+    const stranded = [...bySport.keys()].filter((s) => !sports.includes(s));
+    return [...offered, ...stranded];
+  }, [sports, bySport]);
+
   async function toggleActive(court: Court) {
     setBusyId(court.id);
     setError(null);
@@ -109,9 +118,7 @@ export function CourtsManager({
         <div className="card-base p-6 text-sm text-ink-dim">No courts yet. Add some below.</div>
       ) : (
         <div className="space-y-5">
-          {sports
-            .filter((s) => bySport.has(s))
-            .map((sport) => {
+          {displaySports.map((sport) => {
               const cfg = SPORT_META[sport];
               return (
                 <div key={sport} className="card-base p-5">
