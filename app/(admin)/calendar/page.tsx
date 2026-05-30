@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import { dayRangeUtc, ymdInTz } from '@/lib/tz';
 import { CourtCalendar } from './court-calendar';
 
 export default async function CalendarPage({
@@ -15,7 +16,7 @@ export default async function CalendarPage({
 
   const { data: venue } = await supabase
     .from('venues')
-    .select('id, name, sport, currency')
+    .select('id, name, sport, currency, timezone')
     .eq('owner_id', user.id)
     .order('created_at', { ascending: false })
     .limit(1)
@@ -23,12 +24,11 @@ export default async function CalendarPage({
 
   if (!venue) redirect('/onboarding/profile');
 
+  const tz = venue.timezone || 'Asia/Manila';
   const params = await searchParams;
-  const date = params.d ? new Date(params.d) : new Date();
-  const dayStart = new Date(date);
-  dayStart.setHours(0, 0, 0, 0);
-  const dayEnd = new Date(dayStart);
-  dayEnd.setDate(dayEnd.getDate() + 1);
+  // The day is a venue-local "YYYY-MM-DD"; its UTC window is derived in venue tz.
+  const ymd = params.d ?? ymdInTz(new Date(), tz);
+  const { start: dayStart, end: dayEnd } = dayRangeUtc(ymd, tz);
 
   const { data: courts } = await supabase
     .from('venue_courts')
@@ -56,8 +56,8 @@ export default async function CalendarPage({
 
   return (
     <CourtCalendar
-      venue={venue}
-      date={dayStart.toISOString()}
+      venue={{ ...venue, timezone: tz }}
+      date={ymd}
       courts={courts ?? []}
       slots={slots ?? []}
       bookings={(bookings ?? []) as never}
