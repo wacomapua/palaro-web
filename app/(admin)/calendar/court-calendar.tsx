@@ -7,7 +7,8 @@ import { ChevronLeft, ChevronRight, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/cn';
-import { formatMoney, formatDate } from '@/lib/format';
+import { formatMoney } from '@/lib/format';
+import { addDaysYmd, ymdInTz, hourInTz, formatTimeInTz, formatYmd } from '@/lib/tz';
 import { SPORT_CONFIGS } from '@/lib/sport-presets';
 import type { VenueCourt, VenueSlot, VenueSlotStatus } from '@/lib/types/db';
 import { SlotEditSheet } from './slot-edit-sheet';
@@ -33,17 +34,17 @@ export function CourtCalendar({
   slots,
   bookings,
 }: {
-  venue: { id: string; name: string; currency: string; sport: string };
-  date: string;
+  venue: { id: string; name: string; currency: string; sport: string; timezone: string };
+  date: string; // venue-local "YYYY-MM-DD"
   courts: VenueCourt[];
   slots: VenueSlot[];
   bookings: BookingShape[];
 }) {
   const router = useRouter();
+  const tz = venue.timezone;
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<{ kind: 'new'; courtId: string; hour: number } | { kind: 'edit'; slotId: string } | null>(null);
 
-  const day = new Date(date);
   const tree = useMemo(() => buildCourtTree(courts), [courts]);
   const slotsByCourt = useMemo(() => {
     const m = new Map<string, VenueSlot[]>();
@@ -67,9 +68,7 @@ export function CourtCalendar({
   }, [bookings]);
 
   function shiftDay(delta: number) {
-    const next = new Date(day);
-    next.setDate(next.getDate() + delta);
-    router.push(`/calendar?d=${next.toISOString().slice(0, 10)}`);
+    router.push(`/calendar?d=${addDaysYmd(date, delta)}`);
   }
 
   function toggleCollapse(id: string) {
@@ -96,11 +95,11 @@ export function CourtCalendar({
           <Button variant="ghost" size="icon" onClick={() => shiftDay(-1)}>
             <ChevronLeft className="h-4 w-4" />
           </Button>
-          <span className="min-w-[140px] text-center text-sm font-medium">{formatDate(day)}</span>
+          <span className="min-w-[140px] text-center text-sm font-medium">{formatYmd(date)}</span>
           <Button variant="ghost" size="icon" onClick={() => shiftDay(1)}>
             <ChevronRight className="h-4 w-4" />
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => router.push(`/calendar?d=${new Date().toISOString().slice(0, 10)}`)}>
+          <Button variant="ghost" size="sm" onClick={() => router.push(`/calendar?d=${ymdInTz(new Date(), tz)}`)}>
             Today
           </Button>
         </div>
@@ -204,6 +203,7 @@ export function CourtCalendar({
                       slot={s}
                       bookings={bookingsBySlot.get(s.id) ?? []}
                       currency={venue.currency}
+                      tz={tz}
                       onClick={(e) => {
                         e.stopPropagation();
                         setEditing({ kind: 'edit', slotId: s.id });
@@ -232,7 +232,6 @@ export function CourtCalendar({
         <SlotEditSheet
           venueId={venue.id}
           editing={editing}
-          date={day}
           courts={courts}
           existingSlot={
             editing.kind === 'edit' ? slots.find((s) => s.id === editing.slotId) ?? null : null
@@ -241,6 +240,8 @@ export function CourtCalendar({
             editing.kind === 'edit' ? bookingsBySlot.get(editing.slotId) ?? [] : []
           }
           currency={venue.currency}
+          dayYmd={date}
+          timezone={tz}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
@@ -256,18 +257,21 @@ function SlotBlock({
   slot,
   bookings,
   currency,
+  tz,
   onClick,
 }: {
   slot: VenueSlot;
   bookings: BookingShape[];
   currency: string;
+  tz: string;
   onClick: (e: React.MouseEvent) => void;
 }) {
   const start = new Date(slot.starts_at);
   const end = new Date(slot.ends_at);
   const baseHour = HOURS[0];
-  const left = ((start.getHours() + start.getMinutes() / 60) - baseHour) * HOUR_PX;
+  const left = (hourInTz(start, tz) - baseHour) * HOUR_PX;
   const width = ((end.getTime() - start.getTime()) / 3_600_000) * HOUR_PX;
+  const startLabel = formatTimeInTz(start, tz);
 
   const shared = slot.booking_mode === 'shared';
   const perPlayer = slot.pricing_mode === 'per_player';
@@ -300,7 +304,7 @@ function SlotBlock({
         colors.text,
       )}
       style={{ left, width: Math.max(width - 4, minWidth) }}
-      title={`${start.getHours()}:${start.getMinutes().toString().padStart(2, '0')} · ${
+      title={`${startLabel} · ${
         shared ? `${booked}/${slot.max_players} players` : slot.status
       } · ${formatMoney(priceCents, currency)}${perPlayer ? '/player' : ''}`}
     >
@@ -312,9 +316,7 @@ function SlotBlock({
           </span>
         )}
       </div>
-      <div className="text-[10px] opacity-80 font-mono">
-        {start.getHours()}:{start.getMinutes().toString().padStart(2, '0')}
-      </div>
+      <div className="text-[10px] opacity-80 font-mono">{startLabel}</div>
     </button>
   );
 }

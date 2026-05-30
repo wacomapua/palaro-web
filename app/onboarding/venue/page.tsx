@@ -11,7 +11,7 @@ export default async function VenueStep() {
 
   const { data: venue } = await supabase
     .from('venues')
-    .select('id, name, sport, address, city, phone, description')
+    .select('id, name, sport, address, city, phone, description, timezone')
     .eq('owner_id', user.id)
     .order('created_at', { ascending: false })
     .limit(1)
@@ -43,6 +43,7 @@ export default async function VenueStep() {
                   name: venue.name,
                   sport: venue.sport,
                   sports,
+                  timezone: venue.timezone,
                   address: venue.address,
                   city: venue.city ?? '',
                   phone: venue.phone ?? '',
