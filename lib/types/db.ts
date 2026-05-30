@@ -168,6 +168,31 @@ export type VenueBooking = {
   updated_at: string;
 }
 
+export type VenueSlotTemplate = {
+  id: string;
+  venue_id: string;
+  court_id: string;
+  day_of_week: number; // 0 = Sunday … 6 = Saturday
+  start_time: string; // 'HH:MM:SS'
+  end_time: string;
+  slot_minutes: number;
+  price_cents: number;
+  refund_policy: RefundPolicy | null;
+  active: boolean;
+  paused_until: string | null;
+  created_at: string;
+}
+
+export type VenueClosure = {
+  id: string;
+  venue_id: string;
+  court_id: string | null; // null = whole venue
+  starts_at: string;
+  ends_at: string;
+  reason: string | null;
+  created_at: string;
+}
+
 export type VenuePayout = {
   id: string;
   venue_id: string;
@@ -199,11 +224,18 @@ export type Database = {
       venue_sports: TableShape<VenueSportOffering>;
       venue_courts: TableShape<VenueCourt>;
       venue_slots: TableShape<VenueSlot>;
+      venue_slot_templates: TableShape<VenueSlotTemplate>;
+      venue_closures: TableShape<VenueClosure>;
       venue_bookings: TableShape<VenueBooking>;
       venue_payouts: TableShape<VenuePayout>;
     };
     Views: Record<string, never>;
-    Functions: Record<string, never>;
+    Functions: {
+      generate_venue_slots: {
+        Args: { _venue_id: string; _through: string };
+        Returns: number;
+      };
+    };
     Enums: Record<string, never>;
   };
 };
