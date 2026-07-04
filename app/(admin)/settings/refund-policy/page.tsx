@@ -1,8 +1,8 @@
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { formatRefundPolicy } from '@/lib/refund';
+import { DEFAULT_REFUND_POLICY } from '@/lib/refund';
 import type { RefundPolicy } from '@/lib/types/db';
+import { RefundPolicyForm } from './refund-policy-form';
 
 export default async function RefundPolicyPage() {
   const supabase = await createClient();
@@ -20,7 +20,7 @@ export default async function RefundPolicyPage() {
     .maybeSingle();
   if (!venue) redirect('/onboarding/profile');
 
-  const policy = venue.default_refund_policy as RefundPolicy;
+  const policy = (venue.default_refund_policy as RefundPolicy | null) ?? DEFAULT_REFUND_POLICY;
 
   return (
     <div className="px-8 py-8 max-w-2xl">
@@ -30,26 +30,7 @@ export default async function RefundPolicyPage() {
         stricter policy from the calendar.
       </p>
 
-      <Card className="mt-8">
-        <CardHeader>
-          <CardTitle>Current policy</CardTitle>
-          <CardDescription>The standard tiered approach.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <ul className="space-y-2 text-sm">
-            {formatRefundPolicy(policy).map((line, i) => (
-              <li key={i} className="flex items-center gap-2">
-                <span className="inline-block h-1 w-1 rounded-full bg-brand" />
-                {line}
-              </li>
-            ))}
-          </ul>
-          <p className="mt-6 text-xs text-ink-mute">
-            Editing the policy is coming in Phase 1.5. For now, contact support if
-            you need a custom policy.
-          </p>
-        </CardContent>
-      </Card>
+      <RefundPolicyForm venueId={venue.id} initialPolicy={policy} />
     </div>
   );
 }

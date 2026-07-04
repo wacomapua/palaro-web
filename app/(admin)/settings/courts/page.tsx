@@ -41,7 +41,7 @@ export default async function CourtsSettings() {
       <h1 className="text-3xl font-medium tracking-tight">Courts</h1>
       <p className="mt-1 text-sm text-ink-dim">
         Every bookable court, field, course, or lane. Add a new layout (e.g. another course or a
-        driving range), rename in the calendar, or deactivate what&apos;s out of service.
+        driving range), rename, reorder, or deactivate what&apos;s out of service.
       </p>
 
       <div className="mt-8">

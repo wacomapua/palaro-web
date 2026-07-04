@@ -16,7 +16,7 @@ export default async function CalendarPage({
 
   const { data: venue } = await supabase
     .from('venues')
-    .select('id, name, sport, currency, timezone')
+    .select('id, name, sport, currency, timezone, default_refund_policy')
     .eq('owner_id', user.id)
     .order('created_at', { ascending: false })
     .limit(1)

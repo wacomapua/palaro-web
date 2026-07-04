@@ -10,7 +10,7 @@ import { cn } from '@/lib/cn';
 import { formatMoney } from '@/lib/format';
 import { addDaysYmd, ymdInTz, hourInTz, formatTimeInTz, formatYmd } from '@/lib/tz';
 import { SPORT_CONFIGS } from '@/lib/sport-presets';
-import type { VenueCourt, VenueSlot, VenueSlotStatus } from '@/lib/types/db';
+import type { RefundPolicy, VenueCourt, VenueSlot, VenueSlotStatus } from '@/lib/types/db';
 import { SlotEditSheet } from './slot-edit-sheet';
 
 const SPORT_EMOJI = Object.fromEntries(SPORT_CONFIGS.map((c) => [c.sport, c.emoji]));
@@ -34,7 +34,14 @@ export function CourtCalendar({
   slots,
   bookings,
 }: {
-  venue: { id: string; name: string; currency: string; sport: string; timezone: string };
+  venue: {
+    id: string;
+    name: string;
+    currency: string;
+    sport: string;
+    timezone: string;
+    default_refund_policy: RefundPolicy;
+  };
   date: string; // venue-local "YYYY-MM-DD"
   courts: VenueCourt[];
   slots: VenueSlot[];
@@ -242,6 +249,7 @@ export function CourtCalendar({
           currency={venue.currency}
           dayYmd={date}
           timezone={tz}
+          venueDefaultPolicy={venue.default_refund_policy}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
