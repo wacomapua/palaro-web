@@ -8,9 +8,11 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { createClient } from '@/lib/supabase/client';
 import { formatMoney } from '@/lib/format';
+import { formatRefundPolicy } from '@/lib/refund';
+import { RefundPolicyEditor, normalizeTiers } from '@/components/refund-policy-editor';
 import { zonedTimeToUtc, tzParts, formatTimeInTz, formatYmd } from '@/lib/tz';
 import type { CourtSlotModel } from '@/lib/sport-presets';
-import type { VenueCourt, VenueSlot } from '@/lib/types/db';
+import type { RefundPolicy, VenueCourt, VenueSlot } from '@/lib/types/db';
 
 // "HH:MM" wall-clock time on a venue-local day → UTC instant.
 function localTimeToUtc(dayYmd: string, hhmm: string, tz: string): Date {
@@ -76,6 +78,7 @@ export function SlotEditSheet({
   existingSlot,
   existingBookings,
   currency,
+  venueDefaultPolicy,
   onClose,
   onSaved,
 }: {
@@ -87,6 +90,7 @@ export function SlotEditSheet({
   existingSlot: VenueSlot | null;
   existingBookings: SlotBooking[];
   currency: string;
+  venueDefaultPolicy: RefundPolicy;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -127,6 +131,7 @@ export function SlotEditSheet({
       existingSlot={existingSlot}
       existingBookings={existingBookings}
       currency={currency}
+      venueDefaultPolicy={venueDefaultPolicy}
       onClose={onClose}
       onSaved={onSaved}
     />
@@ -312,6 +317,7 @@ function SingleSlotEditor({
   existingSlot,
   existingBookings,
   currency,
+  venueDefaultPolicy,
   onClose,
   onSaved,
 }: {
@@ -324,6 +330,7 @@ function SingleSlotEditor({
   existingSlot: VenueSlot | null;
   existingBookings: SlotBooking[];
   currency: string;
+  venueDefaultPolicy: RefundPolicy;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -351,6 +358,11 @@ function SingleSlotEditor({
   const priceCents = Math.max(0, Math.round((Number(priceText) || 0) * 100));
   const [maxPlayers, setMaxPlayers] = useState<number>(existingSlot?.max_players ?? model.maxPlayers ?? 4);
 
+  // Per-slot refund override. null = inherit the venue default policy.
+  const [refundOverride, setRefundOverride] = useState<RefundPolicy | null>(
+    existingSlot?.refund_policy ?? null,
+  );
+
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -373,6 +385,12 @@ function SingleSlotEditor({
       return;
     }
 
+    // null persists as "inherit the venue default"; booking cancellation resolves
+    // slot.refund_policy ?? venue default.
+    const refundPolicyToSave: RefundPolicy | null = refundOverride
+      ? { tiers: normalizeTiers(refundOverride.tiers) }
+      : null;
+
     if (isNew && court) {
       const { error: insErr } = await supabase.from('venue_slots').insert({
         venue_id: venueId,
@@ -386,6 +404,7 @@ function SingleSlotEditor({
         booking_mode: shared ? 'shared' : 'exclusive',
         pricing_mode: perPlayer ? 'per_player' : 'per_slot',
         max_players: shared ? maxPlayers : null,
+        refund_policy: refundPolicyToSave,
       });
       if (insErr) {
         setError(insErr.message);
@@ -401,6 +420,7 @@ function SingleSlotEditor({
           price_cents: priceCents,
           price_per_player_cents: perPlayer ? priceCents : null,
           max_players: shared ? maxPlayers : null,
+          refund_policy: refundPolicyToSave,
         })
         .eq('id', existingSlot.id);
       if (updErr) {
@@ -531,6 +551,50 @@ function SingleSlotEditor({
                 </>
               )}
             </p>
+          </div>
+
+          <div className="space-y-2">
+            <label className="flex cursor-pointer items-center gap-2 text-sm text-ink">
+              <input
+                type="checkbox"
+                checked={refundOverride !== null}
+                onChange={(e) =>
+                  setRefundOverride(
+                    e.target.checked
+                      ? { tiers: normalizeTiers(refundOverride?.tiers ?? venueDefaultPolicy.tiers) }
+                      : null,
+                  )
+                }
+                className="h-4 w-4 accent-brand"
+              />
+              Override refund policy for this slot
+            </label>
+
+            {refundOverride !== null ? (
+              <div className="space-y-3 rounded-md border border-line/60 bg-bg-2/40 p-3">
+                <RefundPolicyEditor
+                  value={refundOverride}
+                  onChange={setRefundOverride}
+                  disabled={submitting}
+                />
+                <ul className="space-y-1 text-xs text-ink-dim">
+                  {formatRefundPolicy({ tiers: normalizeTiers(refundOverride.tiers) }).map(
+                    (line, i) => (
+                      <li key={i}>· {line}</li>
+                    ),
+                  )}
+                </ul>
+              </div>
+            ) : (
+              <div className="rounded-md border border-line/60 bg-bg-2/30 p-3 text-xs text-ink-mute">
+                Uses the venue default:
+                <ul className="mt-1 space-y-1">
+                  {formatRefundPolicy(venueDefaultPolicy).map((line, i) => (
+                    <li key={i}>· {line}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
 
           {error && <p className="text-xs text-danger">{error}</p>}
