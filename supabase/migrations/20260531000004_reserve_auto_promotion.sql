@@ -36,9 +36,43 @@
 -- SECURITY DEFINER: the promoted reserve belongs to another user, whom the
 -- releasing member cannot update under RLS. search_path is pinned and every
 -- name is schema qualified.
+--
+-- created_at is the queue order, so it is the server's (PR #11 review,
+-- finding 2): slots_claim and slots_update put no limit on columns, and a
+-- member who wrote created_at = 2000-01-01 was promoted first. A BEFORE
+-- trigger stores now() on every client insert and refuses a client update
+-- of created_at. postgres and service_role (migrations, edge functions,
+-- definer functions) may still set it.
 
 drop trigger if exists event_slots_promote_reserve on public.event_slots;
 drop function if exists public.promote_reserve_on_release();
+
+-- SECURITY INVOKER on purpose: current_user is the caller's role.
+create or replace function public.event_slots_server_created_at()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if current_user in ('postgres', 'service_role', 'supabase_admin') then
+    return new;
+  end if;
+  if tg_op = 'INSERT' then
+    new.created_at := now();
+  elsif new.created_at is distinct from old.created_at then
+    raise exception 'event_slots.created_at is set by the server' using errcode = 'insufficient_privilege';
+  end if;
+  return new;
+end;
+$$;
+
+revoke execute on function public.event_slots_server_created_at() from public, anon, authenticated;
+
+drop trigger if exists event_slots_server_created_at on public.event_slots;
+create trigger event_slots_server_created_at
+  before insert or update of created_at on public.event_slots
+  for each row
+  execute function public.event_slots_server_created_at();
 
 -- The earliest waiting reserve of an event, row locked; NULL when nobody
 -- waits. A reserve row locked elsewhere is waited for. If it changed while

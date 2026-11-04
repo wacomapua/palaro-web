@@ -6,7 +6,7 @@
 -- under slots_update a member may rewrite every column of their own row.
 -- Concurrent releases: reserve_auto_promotion_concurrency.test.sql.
 begin;
-select plan(32);
+select plan(36);
 
 select hasnt_trigger('public', 'event_slots', 'event_slots_promote_reserve', 'the team-manager 0009 trigger is not installed');
 select has_trigger('public', 'event_slots', 'event_slots_promote_on_release', 'release trigger installed');
@@ -228,6 +228,36 @@ select results_eq(format('select slot_type::text, status::text from public.event
   $$values ('confirmed', 'flaked')$$, 'paying or flaking does not release a seat');
 select results_eq(format('select slot_type::text from public.event_slots where id = %L', :'e11_r'),
   $$values ('reserve')$$, 'and nobody is promoted');
+
+-- ---------------------------------------------------------------------------
+-- 8. created_at is the server's (review finding 2): a member cannot jump the
+--    queue by writing their own join time.
+-- ---------------------------------------------------------------------------
+select tests.create_event(:'team', 1) as e12 \gset
+select tests.create_event_slot(:'e12', :'m1', 'confirmed', 1, 'paid') as e12_a \gset
+select tests.create_event_slot(:'e12', :'m2', 'reserve', 1, 'reserved', now() - interval '10 minutes') as e12_honest \gset
+set local role authenticated;
+select tests.claims(:'m3');
+insert into public.event_slots (event_id, user_id, slot_type, position, created_at)
+values (:'e12', :'m3', 'reserve', 2, '2000-01-01');
+reset role;
+select isnt((select created_at from public.event_slots where event_id = :'e12' and user_id = :'m3'), '2000-01-01'::timestamptz,
+  'a member''s own created_at on insert is replaced by the server''s');
+set local role authenticated;
+select tests.claims(:'m2');
+select throws_ok(format($$update public.event_slots set created_at = '2000-01-01' where id = %L$$, :'e12_honest'),
+  '42501', null, 'a member cannot rewrite created_at on their row');
+select tests.claims(:'m1');
+update public.event_slots set status = 'released' where id = :'e12_a';
+reset role;
+select results_eq(format('select user_id, slot_type::text from public.event_slots where event_id = %L order by slot_type', :'e12'),
+  format($$values (%L::uuid, 'confirmed'), (%L::uuid, 'reserve')$$, :'m2', :'m3'),
+  'the reserve who really joined first is promoted, not the one who wrote 2000-01-01');
+set local role service_role;
+update public.event_slots set created_at = now() - interval '1 day' where id = :'e12_honest';
+reset role;
+select is((select created_at from public.event_slots where id = :'e12_honest'), now() - interval '1 day',
+  'the service role may still set it');
 
 select * from finish();
 rollback;
