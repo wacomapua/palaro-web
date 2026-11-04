@@ -22,6 +22,8 @@
 --      PUBLIC, so anyone with the anon key could hold any slot in any
 --      player's name without paying.
 --   7. pg_cron: installed here and both release jobs (re)scheduled by name.
+--   8. complete_venue_booking (C13): the newest booking on an exclusive slot
+--      owns its hold, so an expired hold's late payment returns 'cancelled'.
 
 -- =============================================================================
 -- 1. venue_bookings(slot_id) index; venue_slots_remaining (C5)
@@ -881,3 +883,191 @@ select cron.schedule(
   '* * * * *',
   $cron$ select public.release_stale_shared_bookings(15); $cron$
 );
+
+-- =============================================================================
+-- 8. complete_venue_booking: the newest booking owns the hold (C13)
+-- =============================================================================
+-- Redefined from 20260531000001 with one change: on an exclusive slot, a
+-- booking made after this one (any status) means this booking's hold expired
+-- and was retaken, so its payment returns 'cancelled' exactly like the "slot
+-- taken" race. payments-webhook then reinstates it if the slot is free again
+-- (reinstate_venue_booking's checks) or refunds it, instead of this payment
+-- taking the slot from the player who holds it now. Same rule as
+-- release_held_booking_admin (C11). Shared tee times are unchanged.
+create or replace function public.complete_venue_booking(
+  _intent_id text
+) returns table (
+  booking_id uuid,
+  event_id uuid,
+  status venue_booking_status
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  _booking record;
+  _slot record;
+  _venue record;
+  _court record;
+  _event_id uuid;
+  _slot_count int;
+  _slot_fee_cents int;
+  _event_title text;
+  _other_booking uuid;
+  _mode text;
+  _booked int;
+begin
+  select b.* into _booking
+    from public.venue_bookings b
+   where b.paymongo_intent_id = _intent_id
+   for update;
+
+  if not found then
+    raise exception 'No booking for intent %', _intent_id using errcode = 'no_data_found';
+  end if;
+
+  if _booking.status in ('paid', 'completed', 'cancelled', 'refunded') then
+    return query select _booking.id, _booking.event_id, _booking.status;
+    return;
+  end if;
+
+  select s.* into _slot from public.venue_slots s where s.id = _booking.slot_id for update;
+  select v.* into _venue from public.venues v where v.id = _booking.venue_id;
+  select c.* into _court from public.venue_courts c where c.id = _slot.court_id;
+
+  _mode := coalesce(_slot.booking_mode, 'exclusive');
+
+  -- Closure backstop.
+  if public.venue_window_closed(_slot.venue_id, _slot.court_id, _slot.starts_at, _slot.ends_at) then
+    update public.venue_bookings
+       set status = 'cancelled',
+           refund_reason = 'Venue closed before payment confirmed',
+           updated_at = now()
+     where id = _booking.id;
+    update public.venue_slots vs
+       set status = 'closed', held_until = null
+     where vs.id = _slot.id
+       and vs.status in ('available', 'held');
+    return query select _booking.id, _booking.event_id, 'cancelled'::venue_booking_status;
+    return;
+  end if;
+
+  -- Race detection applies to EXCLUSIVE slots only. On a shared tee time,
+  -- several bookings being 'paid' on the same slot is the normal case.
+  if _mode <> 'shared' then
+    select b.id into _other_booking
+      from public.venue_bookings b
+     where b.slot_id = _booking.slot_id
+       and b.id <> _booking.id
+       and b.status in ('paid', 'completed')
+     limit 1;
+
+    if _other_booking is not null then
+      update public.venue_bookings
+         set status = 'cancelled',
+             refund_reason = 'Slot taken before payment confirmed',
+             updated_at = now()
+       where id = _booking.id;
+      return query select _booking.id, _booking.event_id, 'cancelled'::venue_booking_status;
+      return;
+    end if;
+
+    -- C13: the newest booking on an exclusive slot owns its hold (the C11
+    -- rule). A booking made after this one means this one's hold expired
+    -- and was retaken; its late payment must not take the slot.
+    if exists (
+      select 1 from public.venue_bookings b
+       where b.slot_id = _booking.slot_id
+         and b.id <> _booking.id
+         and b.created_at >= _booking.created_at
+    ) then
+      update public.venue_bookings
+         set status = 'cancelled',
+             refund_reason = 'Slot taken before payment confirmed',
+             updated_at = now()
+       where id = _booking.id;
+      return query select _booking.id, _booking.event_id, 'cancelled'::venue_booking_status;
+      return;
+    end if;
+  end if;
+
+  update public.venue_bookings
+     set status = 'paid', updated_at = now()
+   where id = _booking.id;
+
+  if _mode = 'shared' then
+    -- Mark the tee time booked only when full; otherwise keep it open.
+    select coalesce(sum(b.party_size), 0) into _booked
+      from public.venue_bookings b
+     where b.slot_id = _slot.id
+       and b.status in ('pending_payment','paid','completed');
+    if _slot.max_players is not null and _booked >= _slot.max_players then
+      update public.venue_slots set status = 'booked', held_until = null where id = _slot.id;
+    end if;
+  else
+    update public.venue_slots
+       set status = 'booked', held_until = null
+     where id = _slot.id;
+  end if;
+
+  insert into public.transactions (
+    team_id, user_id, type, amount_cents, currency,
+    platform_fee_cents, gateway, gateway_ref, status, metadata
+  ) values (
+    _booking.team_id, _booking.captain_user_id, 'venue_booking',
+    _booking.total_cents, _venue.currency,
+    _booking.platform_fee_cents, 'paymongo', _intent_id, 'succeeded',
+    jsonb_build_object(
+      'booking_id', _booking.id,
+      'slot_id', _slot.id,
+      'venue_id', _venue.id,
+      'court_id', _court.id,
+      'party_size', _booking.party_size
+    )
+  );
+
+  -- Auto-create a match event only for team bookings (golf walk-ups have no team).
+  if _booking.team_id is not null then
+    _slot_count := greatest(
+      coalesce(_court.capacity / 2, case _venue.sport
+        when 'football'   then 11
+        when 'basketball' then 5
+        when 'tennis'     then 2
+        when 'pickleball' then 2
+        when 'volleyball' then 6
+        else 2
+      end),
+      1
+    );
+    _slot_fee_cents := ceil(_booking.total_cents::numeric / _slot_count)::int;
+    _event_title := 'Match at ' || _venue.name;
+
+    insert into public.events (
+      team_id, title, type, status, location,
+      starts_at, ends_at, slot_count, reserve_count,
+      slot_fee_cents, currency, flake_fee_cents,
+      created_by, venue_booking_id
+    ) values (
+      _booking.team_id, _event_title, 'match', 'draft',
+      _venue.name || ' · ' || _venue.address,
+      _slot.starts_at, _slot.ends_at, _slot_count, 3,
+      _slot_fee_cents, _venue.currency, 0,
+      _booking.captain_user_id, _booking.id
+    )
+    returning id into _event_id;
+
+    update public.venue_bookings
+       set event_id = _event_id, updated_at = now()
+     where id = _booking.id;
+  end if;
+
+  return query select _booking.id, _event_id, 'paid'::venue_booking_status;
+end;
+$$;
+
+-- Preserve the security posture from 0007: only service_role may complete.
+revoke execute on function public.complete_venue_booking(text) from public;
+revoke execute on function public.complete_venue_booking(text) from anon;
+revoke execute on function public.complete_venue_booking(text) from authenticated;
+grant execute on function public.complete_venue_booking(text) to service_role;
