@@ -1,11 +1,27 @@
 // Fails when pnpm audit reports any high or critical advisory that is not
 // explicitly accepted below. Run with: pnpm audit:high
 import { execFileSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 // Accepted until the Next 16 upgrade: next 15 pins postcss 8.4.31, which only
-// processes this app's own CSS at build time.
-const ACCEPTED = new Set(['GHSA-6g55-p6wh-862q', 'GHSA-r28c-9q8g-f849']);
+// processes this app's own CSS at build time. Each exemption covers that one
+// copy only; the same advisory on any other version or path still blocks.
+const NEXT_POSTCSS = { version: '8.4.31', path: '.>next>postcss' };
+const ACCEPTED = new Map([
+  ['GHSA-6g55-p6wh-862q', NEXT_POSTCSS],
+  ['GHSA-r28c-9q8g-f849', NEXT_POSTCSS],
+]);
+
+function isAccepted(advisory) {
+  const scope = ACCEPTED.get(advisory.github_advisory_id);
+  const findings = advisory.findings ?? [];
+  return (
+    Boolean(scope) &&
+    findings.length > 0 &&
+    findings.every((f) => f.version === scope.version && f.paths?.length > 0 && f.paths.every((p) => p === scope.path))
+  );
+}
 const BLOCKING = new Set(['high', 'critical']);
 
 // Throws unless raw is a real audit report, so a registry or network failure
@@ -23,7 +39,7 @@ export function evaluate(raw) {
   }
 
   const advisories = Object.values(report.advisories);
-  const blocking = advisories.filter((a) => BLOCKING.has(a.severity) && !ACCEPTED.has(a.github_advisory_id));
+  const blocking = advisories.filter((a) => BLOCKING.has(a.severity) && !isAccepted(a));
   return { blocking, total: advisories.length };
 }
 
@@ -37,7 +53,10 @@ function runAudit() {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Resolve symlinks on both sides: import.meta.url is the real path, argv[1] is not.
+const isMain = Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+
+if (isMain) {
   const { blocking, total } = evaluate(runAudit());
   for (const a of blocking) {
     console.error(`${a.severity.padEnd(8)} ${a.module_name} ${a.github_advisory_id} ${a.title}`);
