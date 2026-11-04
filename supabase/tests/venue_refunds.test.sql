@@ -6,7 +6,7 @@ select has_table('public', 'venue_refunds', 'venue_refunds exists');
 select columns_are('public', 'venue_refunds', array[
   'id', 'booking_id', 'amount_cents', 'reason', 'status', 'paymongo_refund_id',
   'last_error', 'attempts', 'created_at', 'updated_at',
-  'kind', 'paymongo_intent_id', 'user_id'], 'venue_refunds has exactly the contract columns (C1, C12 c)');
+  'kind', 'paymongo_intent_id', 'user_id', 'next_attempt_at'], 'venue_refunds has exactly the contract columns (C1, C12 c, C13)');
 select is((select relrowsecurity from pg_class where oid = 'public.venue_refunds'::regclass), true, 'RLS is on');
 
 select is(has_function_privilege('anon', 'public.queue_venue_refund(uuid, int, text)', 'execute'), false,

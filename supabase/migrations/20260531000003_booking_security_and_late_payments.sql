@@ -15,13 +15,16 @@
 --      refund for a booking that stands and records the captured payment
 --      (a, b); venue_refunds also holds event slot refunds, queued by
 --      queue_event_slot_refund (c).
---   5. record_venue_refund_result (C10, C12 c): payments-process-refunds
---      records each PayMongo refund outcome of either kind; a success lands
---      on the booking (venue bookings) and in transactions.
+--   5. Refund outcomes (C10, C12 c, C13): record_venue_refund_result records
+--      each PayMongo outcome of either kind (a success lands on the booking
+--      and in transactions; a failure is retried with backoff), and
+--      record_venue_refund_submitted a refund PayMongo has accepted but not
+--      finished.
 --   6. book_venue_slot (C3, P4 part): service_role only. It was executable by
 --      PUBLIC, so anyone with the anon key could hold any slot in any
 --      player's name without paying.
---   7. pg_cron: installed here and both release jobs (re)scheduled by name.
+--   7. pg_cron and pg_net: installed here; both release jobs and the refund
+--      processor job (C13) (re)scheduled by name.
 --   8. complete_venue_booking (C13): the newest booking on an exclusive slot
 --      owns its hold, so an expired hold's late payment returns 'cancelled'.
 
@@ -693,8 +696,19 @@ revoke execute on function public.queue_event_slot_refund(text, int, uuid, text)
 grant execute on function public.queue_event_slot_refund(text, int, uuid, text) to service_role;
 
 -- =============================================================================
--- 5. record_venue_refund_result (C10, C12 c)
+-- 5. Refund outcomes: record_venue_refund_result (C10, C12 c, C13) and
+--    record_venue_refund_submitted (C13)
 -- =============================================================================
+-- C13 refund lifecycle: 'submitted' is a refund PayMongo accepted but has
+-- not finished (the processor polls it), and next_attempt_at is when a
+-- failed refund may be tried again (the processor claims failed rows under
+-- its attempts cap of 8 only once it has passed).
+alter table public.venue_refunds add column if not exists next_attempt_at timestamptz not null default now();
+alter table public.venue_refunds drop constraint if exists venue_refunds_status_check;
+alter table public.venue_refunds
+  add constraint venue_refunds_status_check
+  check (status in ('pending', 'processing', 'submitted', 'succeeded', 'failed'));
+
 -- venue_bookings.refund_amount_cents and refunded_at exist since 0005, and
 -- txn_type 'venue_refund' since 0004; the column statements are no ops kept
 -- for databases that skipped 0005's columns.
@@ -725,7 +739,10 @@ alter table public.venue_bookings add column if not exists refunded_at timestamp
 -- from the intent's payment row, and metadata with the refund, kind, reason,
 -- intent and the payment's event and slot.
 -- A repeat success is a no op, and a failure never downgrades a success.
--- Failure: 'failed' with last_error; attempts belong to the claim.
+-- Failure: 'failed' with last_error, and next_attempt_at = now() +
+-- 5 minutes * 2^(attempts - 1) (5, 10, 20 ... 640 minutes; the seven
+-- retries under the cap of 8 fit inside PayMongo's 24 hour idempotency key
+-- lifetime). attempts belong to the claim; a row never claimed counts as 1.
 -- Lock order: booking row, then refund row (as apply_venue_closure, which
 -- locks bookings before queueing refunds).
 create or replace function public.record_venue_refund_result(
@@ -769,7 +786,8 @@ begin
   if not _succeeded then
     update public.venue_refunds
        set status = 'failed',
-           last_error = coalesce(nullif(btrim(_error), ''), 'Refund failed')
+           last_error = coalesce(nullif(btrim(_error), ''), 'Refund failed'),
+           next_attempt_at = now() + interval '5 minutes' * power(2, greatest(_r.attempts, 1) - 1)
      where id = _r.id;
     return;
   end if;
@@ -840,6 +858,46 @@ $$;
 revoke execute on function public.record_venue_refund_result(uuid, boolean, text, text) from public, anon, authenticated;
 grant execute on function public.record_venue_refund_result(uuid, boolean, text, text) to service_role;
 
+-- PayMongo accepted the refund but reports it pending: 'submitted' with its
+-- PayMongo id, until a poll records it succeeded or failed through
+-- record_venue_refund_result. Idempotent; never downgrades a success. Only
+-- the refund row is locked.
+create or replace function public.record_venue_refund_submitted(
+  _refund_id uuid,
+  _paymongo_refund_id text
+) returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  _r public.venue_refunds;
+begin
+  if nullif(btrim(_paymongo_refund_id), '') is null then
+    raise exception 'A submitted refund needs its PayMongo refund id' using errcode = 'invalid_parameter_value';
+  end if;
+
+  select r.* into _r from public.venue_refunds r where r.id = _refund_id for update;
+  if not found then
+    raise exception 'Refund % not found', _refund_id using errcode = 'no_data_found';
+  end if;
+
+  if _r.status = 'succeeded'
+     or (_r.status = 'submitted' and _r.paymongo_refund_id = btrim(_paymongo_refund_id)) then
+    return;
+  end if;
+
+  update public.venue_refunds
+     set status = 'submitted',
+         paymongo_refund_id = btrim(_paymongo_refund_id),
+         last_error = null
+   where id = _r.id;
+end;
+$$;
+
+revoke execute on function public.record_venue_refund_submitted(uuid, text) from public, anon, authenticated;
+grant execute on function public.record_venue_refund_submitted(uuid, text) to service_role;
+
 -- =============================================================================
 -- 6. book_venue_slot: service_role only (C3, P4 part)
 -- =============================================================================
@@ -861,10 +919,11 @@ grant execute on function public.book_venue_slot(uuid, uuid, uuid, int, int, num
 -- database where the earlier migrations did schedule them) ends with exactly
 -- one of each. Commands as in those migrations.
 create extension if not exists pg_cron;
+create extension if not exists pg_net with schema extensions;
 
 select cron.unschedule(j.jobid)
   from cron.job j
- where j.jobname in ('release-stale-venue-holds', 'release-stale-shared-bookings');
+ where j.jobname in ('release-stale-venue-holds', 'release-stale-shared-bookings', 'process-venue-refunds');
 
 select cron.schedule(
   'release-stale-venue-holds',
@@ -882,6 +941,36 @@ select cron.schedule(
   'release-stale-shared-bookings',
   '* * * * *',
   $cron$ select public.release_stale_shared_bookings(15); $cron$
+);
+
+-- C13: nothing else runs payments-process-refunds on a schedule, and PayMongo
+-- does not redeliver an event answered with 200, so a refund whose first run
+-- failed was never retried. Every 5 minutes this posts {} to the function
+-- with the service role key. Both values come from Vault (runbook: create
+-- the secrets 'project_url', e.g. https://<ref>.supabase.co, and
+-- 'service_role_key' after a restore). Until both exist the job sends
+-- nothing and does not fail; scheduling it never reads them. The request
+-- timeout covers a full processor batch.
+select cron.schedule(
+  'process-venue-refunds',
+  '*/5 * * * *',
+  $cron$
+    select net.http_post(
+             url := rtrim(s.project_url, '/') || '/functions/v1/payments-process-refunds',
+             body := '{}'::jsonb,
+             headers := jsonb_build_object(
+               'Content-Type', 'application/json',
+               'Authorization', 'Bearer ' || s.service_role_key
+             ),
+             timeout_milliseconds := 60000
+           )
+      from (
+        select (select d.decrypted_secret from vault.decrypted_secrets d where d.name = 'project_url') as project_url,
+               (select d.decrypted_secret from vault.decrypted_secrets d where d.name = 'service_role_key') as service_role_key
+      ) s
+     where s.project_url is not null
+       and s.service_role_key is not null
+  $cron$
 );
 
 -- =============================================================================
