@@ -5,8 +5,8 @@ import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { createClient } from '@/lib/supabase/client';
-import { RefundPolicyEditor, normalizeTiers } from '@/components/refund-policy-editor';
-import { formatRefundPolicy } from '@/lib/refund';
+import { RefundPolicyEditor } from '@/components/refund-policy-editor';
+import { formatRefundPolicy, normalizeTiers } from '@/lib/refund';
 import type { RefundPolicy } from '@/lib/types/db';
 
 export function RefundPolicyForm({

@@ -5,13 +5,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type { RefundPolicy, RefundTier } from '@/lib/types/db';
 
-// computeRefund() walks tiers assuming they're sorted descending by
-// hours_before (first threshold <= hoursBefore wins). Editing can leave them in
-// any order, so normalize before persisting.
-export function normalizeTiers(tiers: RefundTier[]): RefundTier[] {
-  return [...tiers].sort((a, b) => b.hours_before - a.hours_before);
-}
-
 /**
  * Editable list of refund tiers ("Nh+ before → X% refund"). Shared by the
  * venue-default policy editor (settings) and the per-slot override (calendar).
