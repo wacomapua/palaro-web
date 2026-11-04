@@ -15,7 +15,7 @@
 -- payments-process-refunds also reads venue_refunds directly (listCandidates,
 -- claim): the columns it selects and the booking embed must keep working.
 begin;
-select plan(86);
+select plan(89);
 
 create temp table rpc_contract (fn text, args text, result text, client boolean) on commit drop;
 insert into rpc_contract values
@@ -103,10 +103,18 @@ reset role;
 -- including the booking embed, which needs the booking_id foreign key).
 select fk_ok('public', 'venue_refunds', 'booking_id', 'public', 'venue_bookings', 'id',
   'venue_refunds.booking_id references venue_bookings, so the booking embed resolves');
-select lives_ok($$select r.id, r.kind, r.booking_id, r.paymongo_intent_id, r.user_id, r.amount_cents, r.reason,
-                         r.status, r.attempts, r.updated_at, r.last_error, r.next_attempt_at, b.paymongo_intent_id
+select lives_ok($$select r.id, r.kind, r.booking_id, r.paymongo_intent_id, r.paymongo_refund_id, r.request_key,
+                         r.user_id, r.amount_cents, r.reason, r.status, r.attempts, r.updated_at, r.last_error,
+                         r.next_attempt_at, b.paymongo_intent_id
                     from public.venue_refunds r left join public.venue_bookings b on b.id = r.booking_id limit 0$$,
-  'every venue_refunds column the processor reads exists, event slot columns included');
+  'every venue_refunds column the processor reads exists, event slot columns and request_key included');
+
+-- C13: the claim update stores the Idempotency-Key it will send
+-- (<refund id>:<attempts>) in request_key, and a stale processing reclaim
+-- resends the stored key. Nullable: rows claimed before it existed have none.
+select has_column('public', 'venue_refunds', 'request_key', 'venue_refunds.request_key exists');
+select col_type_is('public', 'venue_refunds', 'request_key', 'text', 'venue_refunds.request_key is text');
+select col_is_null('public', 'venue_refunds', 'request_key', 'venue_refunds.request_key is nullable');
 
 select * from finish();
 rollback;

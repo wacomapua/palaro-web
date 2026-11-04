@@ -704,6 +704,11 @@ grant execute on function public.queue_event_slot_refund(text, int, uuid, text) 
 -- failed refund may be tried again (the processor claims failed rows under
 -- its attempts cap of 8 only once it has passed).
 alter table public.venue_refunds add column if not exists next_attempt_at timestamptz not null default now();
+-- C13: payments-process-refunds stores the Idempotency-Key it sends
+-- (<refund id>:<attempts>) in the same update that claims a row, and a stale
+-- 'processing' reclaim resends the stored key instead of computing a new
+-- one. NULL for a row never claimed (or claimed before the column existed).
+alter table public.venue_refunds add column if not exists request_key text;
 alter table public.venue_refunds drop constraint if exists venue_refunds_status_check;
 alter table public.venue_refunds
   add constraint venue_refunds_status_check
