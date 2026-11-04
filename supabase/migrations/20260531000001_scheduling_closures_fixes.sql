@@ -13,9 +13,13 @@
 --          release-stale-venue-holds cron statement, the payments-webhook
 --          failure path (a direct service role update) and owner edits.
 --   3. create_venue_closure (C2) is the only way to create a closure: one
---      transaction inserts it, closes every overlapping slot, cancels paid
---      bookings with a 100% refund queued (owner decision 3) and pending
---      ones without, and returns what it did.
+--      transaction inserts it and runs apply_venue_closure, which closes
+--      every overlapping slot, cancels paid bookings with a 100% refund
+--      queued (owner decision 3) and pending ones without; it returns what
+--      it did. This migration runs apply_venue_closure for every closure
+--      that already existed and has not ended.
+--   3b. complete_venue_booking cancels instead of completing a payment on a
+--      slot under a closure, leaving the slot closed.
 --   4. replace_venue_slot_templates validates a whole week first, then
 --      replaces one court group's templates (sport + booking mode)
 --      atomically, so a golf course and its range bays keep separate hours.
@@ -213,14 +217,6 @@ create trigger venue_slots_respect_closures
   for each row
   when (new.status = 'available')
   execute function public.venue_slots_respect_closures();
-
--- Closures written before this migration only closed open slots on their own
--- court. Close the rest of what they cover (bookings are left as they are).
-update public.venue_slots s
-   set status = 'closed', held_until = null
- where s.status = 'available'
-   and s.ends_at > now()
-   and public.venue_window_closed(s.venue_id, s.court_id, s.starts_at, s.ends_at);
 
 -- Closures are created only through create_venue_closure. Owners may still
 -- remove their own.
@@ -494,20 +490,21 @@ end;
 $$;
 
 -- =============================================================================
--- 5. create_venue_closure (C2)
+-- 5. create_venue_closure (C2) and apply_venue_closure
 -- =============================================================================
+-- apply_venue_closure does everything a closure means for one venue_closures
+-- row: every unfinished slot it covers (its court tree, or the whole venue)
+-- becomes 'closed', paid bookings on them are cancelled with a 100% refund
+-- queued, pending ones are cancelled without one, and their match events are
+-- cancelled. Idempotent: slots already closed and bookings already cancelled
+-- are skipped, and queue_venue_refund never queues a second refund.
+--
 -- Lock order matches complete_venue_booking and cancel_venue_booking (booking
--- rows, then slot rows) so the two never deadlock. Bookings are read again
+-- rows, then slot rows) so they never deadlock. Bookings are read again
 -- after the slots are locked, which picks up any hold that committed while
 -- this call waited for a slot.
-create or replace function public.create_venue_closure(
-  _venue_id uuid,
-  _court_id uuid,
-  _starts_at timestamptz,
-  _ends_at timestamptz,
-  _reason text
-) returns table (
-  closure_id uuid,
+create or replace function public.apply_venue_closure(_closure_id uuid)
+returns table (
   closed_slot_count int,
   refunded_booking_ids uuid[]
 )
@@ -516,45 +513,30 @@ security definer
 set search_path = public
 as $$
 declare
-  _id uuid;
-  _note text := nullif(btrim(_reason), '');
+  _cl public.venue_closures;
   _why text;
   _slot_ids uuid[];
   _closed int := 0;
   _refunded uuid[] := '{}';
   _b record;
 begin
-  if not public.is_venue_owner(_venue_id) then
-    raise exception 'Not authorized' using errcode = 'insufficient_privilege';
-  end if;
-  if _starts_at is null or _ends_at is null or _ends_at <= _starts_at then
-    raise exception 'Closure end must be after its start' using errcode = 'invalid_parameter_value';
-  end if;
-  if _ends_at <= now() then
-    raise exception 'That closure has already ended' using errcode = 'invalid_parameter_value';
-  end if;
-  if _court_id is not null and not exists (
-    select 1 from public.venue_courts c where c.id = _court_id and c.venue_id = _venue_id
-  ) then
-    raise exception 'Court does not belong to this venue' using errcode = 'invalid_parameter_value';
+  select * into _cl from public.venue_closures where id = _closure_id;
+  if not found then
+    raise exception 'Closure % not found', _closure_id using errcode = 'no_data_found';
   end if;
 
-  _why := 'Venue closure' || coalesce(': ' || _note, '');
-
-  insert into public.venue_closures (venue_id, court_id, starts_at, ends_at, reason)
-  values (_venue_id, _court_id, _starts_at, _ends_at, _note)
-  returning id into _id;
+  _why := 'Venue closure' || coalesce(': ' || nullif(btrim(_cl.reason), ''), '');
 
   -- Slots under the closure that have not finished. Games already played keep
   -- their payment.
   select coalesce(array_agg(s.id order by s.id), '{}')
     into _slot_ids
     from public.venue_slots s
-   where s.venue_id = _venue_id
-     and s.starts_at < _ends_at
-     and s.ends_at > _starts_at
+   where s.venue_id = _cl.venue_id
+     and s.starts_at < _cl.ends_at
+     and s.ends_at > _cl.starts_at
      and s.ends_at > now()
-     and (_court_id is null or s.court_id in (select public.venue_court_tree_ids(_court_id)));
+     and (_cl.court_id is null or s.court_id in (select public.venue_court_tree_ids(_cl.court_id)));
 
   perform 1 from public.venue_bookings b
    where b.slot_id = any(_slot_ids) and b.status in ('pending_payment', 'paid')
@@ -595,12 +577,245 @@ begin
     end if;
   end loop;
 
+  return query select _closed, _refunded;
+end;
+$$;
+
+revoke execute on function public.apply_venue_closure(uuid) from public, anon, authenticated;
+grant execute on function public.apply_venue_closure(uuid) to service_role;
+
+create or replace function public.create_venue_closure(
+  _venue_id uuid,
+  _court_id uuid,
+  _starts_at timestamptz,
+  _ends_at timestamptz,
+  _reason text
+) returns table (
+  closure_id uuid,
+  closed_slot_count int,
+  refunded_booking_ids uuid[]
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  _id uuid;
+  _closed int;
+  _refunded uuid[];
+begin
+  if not public.is_venue_owner(_venue_id) then
+    raise exception 'Not authorized' using errcode = 'insufficient_privilege';
+  end if;
+  if _starts_at is null or _ends_at is null or _ends_at <= _starts_at then
+    raise exception 'Closure end must be after its start' using errcode = 'invalid_parameter_value';
+  end if;
+  if _ends_at <= now() then
+    raise exception 'That closure has already ended' using errcode = 'invalid_parameter_value';
+  end if;
+  if _court_id is not null and not exists (
+    select 1 from public.venue_courts c where c.id = _court_id and c.venue_id = _venue_id
+  ) then
+    raise exception 'Court does not belong to this venue' using errcode = 'invalid_parameter_value';
+  end if;
+
+  insert into public.venue_closures (venue_id, court_id, starts_at, ends_at, reason)
+  values (_venue_id, _court_id, _starts_at, _ends_at, nullif(btrim(_reason), ''))
+  returning id into _id;
+
+  select a.closed_slot_count, a.refunded_booking_ids
+    into _closed, _refunded
+    from public.apply_venue_closure(_id) a;
+
   return query select _id, _closed, _refunded;
 end;
 $$;
 
 revoke execute on function public.create_venue_closure(uuid, uuid, timestamptz, timestamptz, text) from public, anon;
 grant execute on function public.create_venue_closure(uuid, uuid, timestamptz, timestamptz, text) to authenticated, service_role;
+
+-- Closures written before this migration only closed open slots on their own
+-- court and left every booking under them alone. Give each one that has not
+-- ended the same treatment a new closure gets.
+do $$
+declare
+  _c uuid;
+begin
+  for _c in
+    select id from public.venue_closures where ends_at > now() order by created_at, id
+  loop
+    perform public.apply_venue_closure(_c);
+  end loop;
+end $$;
+
+-- =============================================================================
+-- 5b. complete_venue_booking: never complete into a closure
+-- =============================================================================
+-- Same signature and body as 20260529000002, plus a backstop after the slot
+-- row is locked: a payment that lands on a slot a closure covers does not
+-- make the booking paid. The booking is cancelled and the slot left closed,
+-- returned exactly like the "another booking won the slot" race, so the
+-- payments-webhook reinstates or refunds the payer (reinstatement rejects
+-- closed slots).
+create or replace function public.complete_venue_booking(
+  _intent_id text
+) returns table (
+  booking_id uuid,
+  event_id uuid,
+  status venue_booking_status
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  _booking record;
+  _slot record;
+  _venue record;
+  _court record;
+  _event_id uuid;
+  _slot_count int;
+  _slot_fee_cents int;
+  _event_title text;
+  _other_booking uuid;
+  _mode text;
+  _booked int;
+begin
+  select b.* into _booking
+    from public.venue_bookings b
+   where b.paymongo_intent_id = _intent_id
+   for update;
+
+  if not found then
+    raise exception 'No booking for intent %', _intent_id using errcode = 'no_data_found';
+  end if;
+
+  if _booking.status in ('paid', 'completed', 'cancelled', 'refunded') then
+    return query select _booking.id, _booking.event_id, _booking.status;
+    return;
+  end if;
+
+  select s.* into _slot from public.venue_slots s where s.id = _booking.slot_id for update;
+  select v.* into _venue from public.venues v where v.id = _booking.venue_id;
+  select c.* into _court from public.venue_courts c where c.id = _slot.court_id;
+
+  _mode := coalesce(_slot.booking_mode, 'exclusive');
+
+  -- Closure backstop.
+  if public.venue_window_closed(_slot.venue_id, _slot.court_id, _slot.starts_at, _slot.ends_at) then
+    update public.venue_bookings
+       set status = 'cancelled',
+           refund_reason = 'Venue closed before payment confirmed',
+           updated_at = now()
+     where id = _booking.id;
+    update public.venue_slots vs
+       set status = 'closed', held_until = null
+     where vs.id = _slot.id
+       and vs.status in ('available', 'held');
+    return query select _booking.id, _booking.event_id, 'cancelled'::venue_booking_status;
+    return;
+  end if;
+
+  -- Race detection applies to EXCLUSIVE slots only. On a shared tee time,
+  -- several bookings being 'paid' on the same slot is the normal case.
+  if _mode <> 'shared' then
+    select b.id into _other_booking
+      from public.venue_bookings b
+     where b.slot_id = _booking.slot_id
+       and b.id <> _booking.id
+       and b.status in ('paid', 'completed')
+     limit 1;
+
+    if _other_booking is not null then
+      update public.venue_bookings
+         set status = 'cancelled',
+             refund_reason = 'Slot taken before payment confirmed',
+             updated_at = now()
+       where id = _booking.id;
+      return query select _booking.id, _booking.event_id, 'cancelled'::venue_booking_status;
+      return;
+    end if;
+  end if;
+
+  update public.venue_bookings
+     set status = 'paid', updated_at = now()
+   where id = _booking.id;
+
+  if _mode = 'shared' then
+    -- Mark the tee time booked only when full; otherwise keep it open.
+    select coalesce(sum(b.party_size), 0) into _booked
+      from public.venue_bookings b
+     where b.slot_id = _slot.id
+       and b.status in ('pending_payment','paid','completed');
+    if _slot.max_players is not null and _booked >= _slot.max_players then
+      update public.venue_slots set status = 'booked', held_until = null where id = _slot.id;
+    end if;
+  else
+    update public.venue_slots
+       set status = 'booked', held_until = null
+     where id = _slot.id;
+  end if;
+
+  insert into public.transactions (
+    team_id, user_id, type, amount_cents, currency,
+    platform_fee_cents, gateway, gateway_ref, status, metadata
+  ) values (
+    _booking.team_id, _booking.captain_user_id, 'venue_booking',
+    _booking.total_cents, _venue.currency,
+    _booking.platform_fee_cents, 'paymongo', _intent_id, 'succeeded',
+    jsonb_build_object(
+      'booking_id', _booking.id,
+      'slot_id', _slot.id,
+      'venue_id', _venue.id,
+      'court_id', _court.id,
+      'party_size', _booking.party_size
+    )
+  );
+
+  -- Auto-create a match event only for team bookings (golf walk-ups have no team).
+  if _booking.team_id is not null then
+    _slot_count := greatest(
+      coalesce(_court.capacity / 2, case _venue.sport
+        when 'football'   then 11
+        when 'basketball' then 5
+        when 'tennis'     then 2
+        when 'pickleball' then 2
+        when 'volleyball' then 6
+        else 2
+      end),
+      1
+    );
+    _slot_fee_cents := ceil(_booking.total_cents::numeric / _slot_count)::int;
+    _event_title := 'Match at ' || _venue.name;
+
+    insert into public.events (
+      team_id, title, type, status, location,
+      starts_at, ends_at, slot_count, reserve_count,
+      slot_fee_cents, currency, flake_fee_cents,
+      created_by, venue_booking_id
+    ) values (
+      _booking.team_id, _event_title, 'match', 'draft',
+      _venue.name || ' · ' || _venue.address,
+      _slot.starts_at, _slot.ends_at, _slot_count, 3,
+      _slot_fee_cents, _venue.currency, 0,
+      _booking.captain_user_id, _booking.id
+    )
+    returning id into _event_id;
+
+    update public.venue_bookings
+       set event_id = _event_id, updated_at = now()
+     where id = _booking.id;
+  end if;
+
+  return query select _booking.id, _event_id, 'paid'::venue_booking_status;
+end;
+$$;
+
+-- Preserve the security posture from 0007: only service_role may complete.
+revoke execute on function public.complete_venue_booking(text) from public;
+revoke execute on function public.complete_venue_booking(text) from anon;
+revoke execute on function public.complete_venue_booking(text) from authenticated;
+grant execute on function public.complete_venue_booking(text) to service_role;
 
 -- =============================================================================
 -- 6. replace_venue_slot_templates

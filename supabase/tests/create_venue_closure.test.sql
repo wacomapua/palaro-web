@@ -139,7 +139,8 @@ select * from public.create_venue_closure(:'venue', null,
 reset role;
 select is(:'c3_closed_slot_count'::int, 1, 'an overlapping closure only closes slots still open (South 10:00)');
 select is(:'c3_refunded_booking_ids'::uuid[], '{}'::uuid[], 'already cancelled bookings are not refunded twice');
-select is((select count(*)::int from public.venue_refunds), 3, 'still exactly three refunds queued');
+select is((select count(*)::int from public.venue_refunds r join public.venue_bookings b on b.id = r.booking_id where b.venue_id = :'venue'), 3,
+  'still exactly three refunds queued');
 
 -- ---------- the closure blocks booking afterwards ----------
 select throws_like(
