@@ -12,63 +12,9 @@
 //      two such sessions each wait for the other's key share lock.
 //   D. A promotion races a direct claim of the same free seat: it waits for
 //      the claim, then takes the next free seat instead of failing the join.
-import { spawn, spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { connect } from './sessions.mjs';
 
-const container = process.env.PALARO_DBTEST_CONTAINER;
-const password = process.env.PALARO_DBTEST_PASSWORD;
-if (!container || !password) {
-  console.error('run through pnpm test:db');
-  process.exit(2);
-}
-
-const tag = randomBytes(4).toString('hex');
-const psqlArgs = (app) => [
-  'exec', '-i', '-e', `PGPASSWORD=${password}`, '-e', `PGAPPNAME=${app}`, container,
-  'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-h', '127.0.0.1', '-U', 'postgres', '-d', 'postgres',
-];
-const sql = (text) => spawnSync('docker', psqlArgs(`promo_${tag}`), { input: text, encoding: 'utf8' });
-const value = (text) => sql(text).stdout.trim();
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// A psql session fed statement by statement.
-function session(name) {
-  const app = `promo_${tag}_${name}`;
-  const p = spawn('docker', psqlArgs(app), { stdio: ['pipe', 'pipe', 'pipe'] });
-  const s = { app, out: '', status: null };
-  p.stdout.on('data', (d) => (s.out += d));
-  p.stderr.on('data', (d) => (s.out += d));
-  // psql stops at the first error (ON_ERROR_STOP); later writes then hit a
-  // closed pipe, which the checks report instead of crashing the run.
-  p.stdin.on('error', () => {});
-  s.done = new Promise((r) => p.on('exit', (code) => r((s.status = code))));
-  s.send = (text) => p.stdin.write(`${text}\n`);
-  s.end = async (text = '') => {
-    p.stdin.end(text ? `${text}\n` : '');
-    await Promise.race([s.done, sleep(15_000)]);
-    if (s.status === null) p.kill('SIGKILL');
-    return s.status;
-  };
-  return s;
-}
-
-// Polls pg_stat_activity until exactly one backend matches `where`.
-async function until(where, ms = 10_000) {
-  for (const deadline = Date.now() + ms; Date.now() < deadline; ) {
-    if (value(`select count(*) from pg_stat_activity where ${where}`) === '1') return true;
-    await sleep(50);
-  }
-  return false;
-}
-const idleInTx = (app) => until(`application_name = '${app}' and state = 'idle in transaction'`);
-const waitingOnLock = (app) => until(`application_name = '${app}' and wait_event_type = 'Lock'`);
-// The session finished its statement (and renamed itself) or blocks on a lock.
-const settled = (app) =>
-  until(`(application_name = '${app}' and wait_event_type = 'Lock') or (application_name = '${app}_done' and state = 'idle')`);
-
-const results = [];
-const check = (ok, name, detail = '') => results.push({ ok, name, detail });
-const rows = (query) => value(query).split('\n').filter(Boolean).join(' ');
+const { sql, rows, session, idleInTx, waitingOnLock, settled, check, report } = connect('promo');
 
 // Committed fixture: four events of one team; other sessions only see
 // committed rows.
@@ -186,8 +132,4 @@ const cleanup = sql(`delete from public.teams where id = '${team}';
   delete from auth.users where id in (${users.map((u) => `'${u}'`).join(', ')});`);
 check(cleanup.status === 0, 'committed fixture removed', cleanup.stderr);
 
-console.log(`1..${results.length}`);
-results.forEach((r, i) => {
-  console.log(`${r.ok ? 'ok' : 'not ok'} ${i + 1} - ${r.name}`);
-  if (!r.ok && r.detail) for (const line of r.detail.trim().split('\n')) console.log(`# ${line}`);
-});
+report();
