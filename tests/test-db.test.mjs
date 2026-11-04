@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluateTap, migrationFiles } from '../scripts/test-db.mjs';
+import { evaluateTap, migrationFiles, sessionTestFiles } from '../scripts/test-db.mjs';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -53,6 +53,19 @@ test('migrations are applied in file name order', () => {
       '20260529000001_x.sql',
       '20260531000001_b.sql',
     ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('session tests are the node scripts in supabase/tests, in file name order', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tests-'));
+  try {
+    for (const f of ['b_locks.test.mjs', 'a.test.sql', 'a_locks.test.mjs', 'helper.mjs', 'notes.md']) {
+      writeFileSync(join(dir, f), '');
+    }
+    mkdirSync(join(dir, 'setup'));
+    assert.deepEqual(sessionTestFiles(dir), ['a_locks.test.mjs', 'b_locks.test.mjs']);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
