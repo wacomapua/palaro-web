@@ -1,9 +1,11 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { formatMoney, formatDateTime } from '@/lib/format';
+import { DEFAULT_TIMEZONE } from '@/lib/tz';
 import type { VenueBooking } from '@/lib/types/db';
 
 type BookingRow = Pick<
@@ -21,14 +23,18 @@ export default async function BookingsPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const { data: venue } = await supabase
-    .from('venues')
-    .select('id, currency')
-    .eq('owner_id', user.id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const venue = dataOrThrow(
+    await supabase
+      .from('venues')
+      .select('id, currency, timezone')
+      .eq('owner_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    'venue',
+  );
   if (!venue) redirect('/onboarding/profile');
+  const tz = venue.timezone || DEFAULT_TIMEZONE;
 
   const { data: bookingsRaw } = await supabase
     .from('venue_bookings')
@@ -74,7 +80,7 @@ export default async function BookingsPage() {
                     <td className="py-2.5 font-mono tnum text-[12px]">
                       {/* deno-lint-ignore no-explicit-any */}
                       {(b as any).slot?.starts_at
-                        ? formatDateTime((b as any).slot.starts_at)
+                        ? formatDateTime((b as any).slot.starts_at, tz)
                         : '—'}
                     </td>
                     {/* deno-lint-ignore no-explicit-any */}
