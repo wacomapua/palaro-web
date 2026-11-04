@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
 import { DEFAULT_TIMEZONE, dayRangeUtc, ymdInTz } from '@/lib/tz';
 import { CourtCalendar } from './court-calendar';
 
@@ -14,13 +15,16 @@ export default async function CalendarPage({
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const { data: venue } = await supabase
-    .from('venues')
-    .select('id, name, sport, currency, timezone')
-    .eq('owner_id', user.id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const venue = dataOrThrow(
+    await supabase
+      .from('venues')
+      .select('id, name, sport, currency, timezone')
+      .eq('owner_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    'venue',
+  );
 
   if (!venue) redirect('/onboarding/profile');
 

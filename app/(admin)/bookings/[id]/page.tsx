@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { redirect, notFound } from 'next/navigation';
 import { ArrowLeft } from 'lucide-react';
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -38,16 +39,19 @@ export default async function BookingDetail({
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const { data: bookingRaw } = await supabase
-    .from('venue_bookings')
-    .select(`
-      *,
-      venue:venues(name, currency, default_refund_policy, timezone),
-      slot:venue_slots(starts_at, ends_at, refund_policy, court:venue_courts(name)),
-      captain:profiles!captain_user_id(display_name, phone, email)
-    `)
-    .eq('id', id)
-    .maybeSingle();
+  const bookingRaw = dataOrThrow(
+    await supabase
+      .from('venue_bookings')
+      .select(`
+        *,
+        venue:venues(name, currency, default_refund_policy, timezone),
+        slot:venue_slots(starts_at, ends_at, refund_policy, court:venue_courts(name)),
+        captain:profiles!captain_user_id(display_name, phone, email)
+      `)
+      .eq('id', id)
+      .maybeSingle(),
+    'booking',
+  );
 
   const booking = bookingRaw as unknown as BookingWithJoins | null;
   if (!booking || !booking.venue || !booking.slot || !booking.slot.court || !booking.captain) {
