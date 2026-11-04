@@ -119,8 +119,10 @@ select is((select count(*)::int from public.event_slots where event_id = :'e4' a
   'the real seats are untouched');
 
 -- ---------------------------------------------------------------------------
--- 5. Spoof: a confirmed player releases while moving the row to another
---    event and position. Only OLD.event_id and OLD.position count.
+-- 5. A release that also moves the row to another event and position. Only
+--    OLD.event_id and OLD.position count. Clients can no longer move a row
+--    (event_slots_client_guard.test.sql), so the service role writes it;
+--    the trigger still trusts nothing but OLD.
 -- ---------------------------------------------------------------------------
 select tests.create_event(:'team', 2) as e5 \gset
 select tests.create_event_slot(:'e5', :'m5', 'confirmed', 1, 'paid') as e5_mover \gset
@@ -130,8 +132,7 @@ select tests.create_event(:'team', 2) as e6 \gset
 select tests.create_event_slot(:'e6', :'m1', 'confirmed', 1, 'paid') \gset
 select tests.create_event_slot(:'e6', :'m2', 'confirmed', 2, 'paid') \gset
 select tests.create_event_slot(:'e6', :'m8', 'reserve', 1, 'reserved', now() - interval '2 hours') as e6_res \gset
-set local role authenticated;
-select tests.claims(:'m5');
+set local role service_role;
 update public.event_slots set status = 'released', event_id = :'e6', position = 7 where id = :'e5_mover';
 reset role;
 select results_eq(format('select event_id, slot_type::text, position from public.event_slots where id = %L', :'e6_res'),

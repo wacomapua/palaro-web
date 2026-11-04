@@ -37,18 +37,35 @@
 -- releasing member cannot update under RLS. search_path is pinned and every
 -- name is schema qualified.
 --
--- created_at is the queue order, so it is the server's (PR #11 review,
--- finding 2): slots_claim and slots_update put no limit on columns, and a
--- member who wrote created_at = 2000-01-01 was promoted first. A BEFORE
--- trigger stores now() on every client insert and refuses a client update
--- of created_at. postgres and service_role (migrations, edge functions,
--- definer functions) may still set it.
+-- Client guard (PR #11 review). slots_claim and slots_update (0002) put no
+-- limit on columns, so through PostgREST a member (or a captain, on any row
+-- of their team's events) could:
+--   * insert or update a row as 'paid', or with paid_at, and hold a seat
+--     without paying (only payments-webhook, as the service role, marks a
+--     slot paid);
+--   * write created_at, the queue order: created_at = 2000-01-01 was
+--     promoted first;
+--   * move an old row into another event, or hand it to another player,
+--     keeping its created_at;
+--   * flip a released reserve back to 'reserved' and keep the created_at
+--     of when it first joined.
+-- One BEFORE INSERT OR UPDATE trigger, for every role but postgres,
+-- service_role and supabase_admin (migrations, edge functions, and the
+-- definer functions below, which run as their owner postgres): refuses a
+-- paid insert, a change to 'paid', a non null paid_at that was not there
+-- before, a change of event_id or user_id, and any write of created_at;
+-- stamps created_at with now() on insert and when a released row comes
+-- back. Every write the team-manager app makes as authenticated passes:
+-- the insert of a 'reserved' row, the reclaim (slot_type, position,
+-- status 'reserved', paid_at null), the rollback and useReleaseSlot
+-- (status 'released', paid_at null, by the player or the captain), and the
+-- delete of a released row.
 
 drop trigger if exists event_slots_promote_reserve on public.event_slots;
 drop function if exists public.promote_reserve_on_release();
 
 -- SECURITY INVOKER on purpose: current_user is the caller's role.
-create or replace function public.event_slots_server_created_at()
+create or replace function public.event_slots_client_guard()
 returns trigger
 language plpgsql
 set search_path = public
@@ -57,22 +74,43 @@ begin
   if current_user in ('postgres', 'service_role', 'supabase_admin') then
     return new;
   end if;
+
   if tg_op = 'INSERT' then
+    if new.status = 'paid' or new.paid_at is not null then
+      raise exception 'event_slots: only a payment marks a slot paid' using errcode = 'insufficient_privilege';
+    end if;
     new.created_at := now();
-  elsif new.created_at is distinct from old.created_at then
+    return new;
+  end if;
+
+  if new.created_at is distinct from old.created_at then
     raise exception 'event_slots.created_at is set by the server' using errcode = 'insufficient_privilege';
+  end if;
+  if new.event_id is distinct from old.event_id or new.user_id is distinct from old.user_id then
+    raise exception 'event_slots: a slot cannot change event or player' using errcode = 'insufficient_privilege';
+  end if;
+  if (new.status = 'paid' and old.status is distinct from 'paid')
+     or (new.paid_at is not null and new.paid_at is distinct from old.paid_at) then
+    raise exception 'event_slots: only a payment marks a slot paid' using errcode = 'insufficient_privilege';
+  end if;
+
+  -- Back from released: it joins the reserve queue now, not when it first did.
+  if old.status = 'released' and new.status <> 'released' then
+    new.created_at := now();
   end if;
   return new;
 end;
 $$;
 
-revoke execute on function public.event_slots_server_created_at() from public, anon, authenticated;
+revoke execute on function public.event_slots_client_guard() from public, anon, authenticated;
 
 drop trigger if exists event_slots_server_created_at on public.event_slots;
-create trigger event_slots_server_created_at
-  before insert or update of created_at on public.event_slots
+drop function if exists public.event_slots_server_created_at();
+drop trigger if exists event_slots_client_guard on public.event_slots;
+create trigger event_slots_client_guard
+  before insert or update on public.event_slots
   for each row
-  execute function public.event_slots_server_created_at();
+  execute function public.event_slots_client_guard();
 
 -- The earliest waiting reserve of an event, row locked; NULL when nobody
 -- waits. A reserve row locked elsewhere is waited for. If it changed while
