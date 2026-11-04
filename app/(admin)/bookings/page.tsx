@@ -4,6 +4,7 @@ import { createClient } from '@/lib/supabase/server';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { formatMoney, formatDateTime } from '@/lib/format';
+import { DEFAULT_TIMEZONE } from '@/lib/tz';
 import type { VenueBooking } from '@/lib/types/db';
 
 type BookingRow = Pick<
@@ -23,12 +24,13 @@ export default async function BookingsPage() {
 
   const { data: venue } = await supabase
     .from('venues')
-    .select('id, currency')
+    .select('id, currency, timezone')
     .eq('owner_id', user.id)
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
   if (!venue) redirect('/onboarding/profile');
+  const tz = venue.timezone || DEFAULT_TIMEZONE;
 
   const { data: bookingsRaw } = await supabase
     .from('venue_bookings')
@@ -74,7 +76,7 @@ export default async function BookingsPage() {
                     <td className="py-2.5 font-mono tnum text-[12px]">
                       {/* deno-lint-ignore no-explicit-any */}
                       {(b as any).slot?.starts_at
-                        ? formatDateTime((b as any).slot.starts_at)
+                        ? formatDateTime((b as any).slot.starts_at, tz)
                         : '—'}
                     </td>
                     {/* deno-lint-ignore no-explicit-any */}

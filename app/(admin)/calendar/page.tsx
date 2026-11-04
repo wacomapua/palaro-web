@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
-import { dayRangeUtc, ymdInTz } from '@/lib/tz';
+import { DEFAULT_TIMEZONE, dayRangeUtc, ymdInTz } from '@/lib/tz';
 import { CourtCalendar } from './court-calendar';
 
 export default async function CalendarPage({
@@ -24,7 +24,7 @@ export default async function CalendarPage({
 
   if (!venue) redirect('/onboarding/profile');
 
-  const tz = venue.timezone || 'Asia/Manila';
+  const tz = venue.timezone || DEFAULT_TIMEZONE;
   const params = await searchParams;
   // The day is a venue-local "YYYY-MM-DD"; its UTC window is derived in venue tz.
   const ymd = params.d ?? ymdInTz(new Date(), tz);

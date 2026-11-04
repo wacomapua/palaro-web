@@ -5,6 +5,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/com
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { formatMoney, formatDateTime } from '@/lib/format';
+import { DEFAULT_TIMEZONE } from '@/lib/tz';
 
 export default async function SlotsPage() {
   const supabase = await createClient();
@@ -15,13 +16,14 @@ export default async function SlotsPage() {
 
   const { data: venue } = await supabase
     .from('venues')
-    .select('id, name, currency')
+    .select('id, name, currency, timezone')
     .eq('owner_id', user.id)
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
   if (!venue) redirect('/onboarding/profile');
 
+  const tz = venue.timezone || DEFAULT_TIMEZONE;
   const now = new Date().toISOString();
   type SlotRow = {
     id: string;
@@ -77,7 +79,7 @@ export default async function SlotsPage() {
                 {slots.map((s) => (
                   <tr key={s.id} className="border-b border-line/30">
                     <td className="py-2.5 font-mono tnum text-[12px]">
-                      {formatDateTime(s.starts_at)}
+                      {formatDateTime(s.starts_at, tz)}
                     </td>
                     {/* deno-lint-ignore no-explicit-any */}
                     <td>{(s as any).court?.name ?? '—'}</td>

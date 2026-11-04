@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import * as tz from '../lib/tz.ts';
 import {
   addDaysYmd,
   dayRangeUtc,
@@ -9,29 +9,10 @@ import {
   ymdInTz,
   zonedTimeToUtc,
 } from '../lib/tz.ts';
+import { runInTz } from './run-in-tz.mjs';
 
 const HOUR = 3_600_000;
 const TZ_URL = new URL('../lib/tz.ts', import.meta.url).href;
-
-// TZ is read when a process starts, so behaviour under another process
-// timezone is checked in a child node. The child also reports the zone it
-// resolved, so a typo here cannot make the test pass vacuously.
-function runInTz(tz, body) {
-  const code = `
-    const tz = await import(${JSON.stringify(TZ_URL)});
-    const out = { resolved: Intl.DateTimeFormat().resolvedOptions().timeZone };
-    ${body}
-    process.stdout.write(JSON.stringify(out));
-  `;
-  const r = spawnSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', code], {
-    env: { ...process.env, TZ: tz },
-    encoding: 'utf8',
-  });
-  assert.equal(r.status, 0, r.stderr);
-  const out = JSON.parse(r.stdout);
-  assert.equal(out.resolved, tz, 'child process did not pick up TZ');
-  return out;
-}
 
 const hours = ({ start, end }) => (end.getTime() - start.getTime()) / HOUR;
 
@@ -152,8 +133,24 @@ test('formatYmd renders the given calendar date', () => {
 
 test('formatYmd keeps the same date in processes far ahead of or behind UTC', () => {
   for (const zone of ['Pacific/Auckland', 'Pacific/Kiritimati', 'Pacific/Pago_Pago']) {
-    const out = runInTz(zone, `out.a = tz.formatYmd('2026-05-30'); out.b = tz.formatYmd('2026-12-31');`);
+    const out = runInTz(zone, TZ_URL, `out.a = m.formatYmd('2026-05-30'); out.b = m.formatYmd('2026-12-31');`);
     assert.equal(out.a, 'Sat, May 30, 2026', zone);
     assert.equal(out.b, 'Thu, Dec 31, 2026', zone);
   }
+});
+
+test('weekStartYmd returns the Sunday that starts the week', () => {
+  assert.equal(tz.weekStartYmd('2026-11-04'), '2026-11-01'); // Wednesday
+  assert.equal(tz.weekStartYmd('2026-11-01'), '2026-11-01'); // Sunday
+  assert.equal(tz.weekStartYmd('2026-10-31'), '2026-10-25'); // Saturday
+  assert.equal(tz.weekStartYmd('2027-01-02'), '2026-12-27'); // across year end
+});
+
+test('venue week window starts at Sunday midnight in the venue', () => {
+  // 1:00 AM Saturday 30 May in Manila, still Friday 29 May in UTC.
+  const now = new Date('2026-05-29T17:00:00Z');
+  const today = ymdInTz(now, 'Asia/Manila');
+  assert.equal(today, '2026-05-30');
+  const weekStart = dayRangeUtc(tz.weekStartYmd(today), 'Asia/Manila').start;
+  assert.equal(weekStart.toISOString(), '2026-05-23T16:00:00.000Z');
 });
