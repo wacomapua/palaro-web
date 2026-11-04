@@ -1,5 +1,5 @@
 -- swap_venue_court_sort_order (PR #8 review, finding 4). sort_order is one
--- sequence across the whole venue (court-layout-builder numbers every sport
+-- sequence across the whole venue (the court layout builder numbers every sport
 -- in one run and the calendar orders all roots by it), so a move swaps the
 -- two courts' existing values and never renumbers a sibling group from 0.
 -- A venue with duplicate values is renumbered first, keeping its order.
