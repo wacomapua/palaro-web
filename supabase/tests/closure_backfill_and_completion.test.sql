@@ -1,9 +1,8 @@
--- Closures that existed before 20260531000001 get the full create_venue_closure
--- treatment (apply_venue_closure, run by the migration for every closure that
--- has not ended), and complete_venue_booking never turns a booking under a
--- closure into a paid one.
+-- apply_venue_closure gives a closure written the old way the full
+-- create_venue_closure treatment, and complete_venue_booking never turns a
+-- booking under a closure into a paid one.
 begin;
-select plan(32);
+select plan(33);
 
 select tests.create_user() as owner \gset
 select tests.create_user() as p1 \gset
@@ -85,14 +84,12 @@ select is((select prosecdef from pg_proc where oid = 'public.apply_venue_closure
 select ok((select proconfig @> array['search_path=public'] from pg_proc where oid = 'public.apply_venue_closure(uuid)'::regprocedure),
   'apply_venue_closure pins search_path');
 
--- Exactly what the migration runs for existing closures.
-do $$
-declare _c uuid;
-begin
-  for _c in select id from public.venue_closures where ends_at > now() order by created_at, id loop
-    perform public.apply_venue_closure(_c);
-  end loop;
-end $$;
+-- The helper on its own, over this venue's closures that have not ended. The
+-- migration's own run over pre-existing closures is covered by
+-- premigrate_closures.test.sql.
+select lives_ok(
+  format('select public.apply_venue_closure(id) from public.venue_closures where venue_id = %L and ends_at > now() order by created_at, id', :'venue'),
+  'apply_venue_closure runs over the venue''s active closures');
 
 select is((select status::text from public.venue_bookings where id = :'b_tee_paid'), 'cancelled', 'paid golfer under a legacy closure is cancelled');
 select results_eq(
