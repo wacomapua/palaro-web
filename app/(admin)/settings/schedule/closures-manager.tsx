@@ -2,13 +2,21 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Trash2 } from 'lucide-react';
+import { Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { createClient } from '@/lib/supabase/client';
-import { zonedTimeToUtc } from '@/lib/tz';
+import {
+  affectedBookingLine,
+  closureRequest,
+  closureSummary,
+  fmtRange,
+  readClosureResult,
+  refundWarning,
+  type AffectedBooking,
+} from '@/lib/closures';
 import type { VenueSport } from '@/lib/types/db';
 
 interface Court {
@@ -24,37 +32,22 @@ interface Closure {
   ends_at: string;
   reason: string | null;
 }
-
-// Parse a datetime-local value ("YYYY-MM-DDTHH:MM"), interpreted as venue-local
-// wall time, into a UTC instant.
-function localInputToUtc(value: string, tz: string): Date | null {
-  if (!value) return null;
-  const [d, t] = value.split('T');
-  if (!d || !t) return null;
-  const [y, mo, day] = d.split('-').map(Number);
-  const [h, mi] = t.split(':').map(Number);
-  return zonedTimeToUtc(y, mo, day, h, mi, tz);
-}
-
-function fmtRange(startsIso: string, endsIso: string, tz: string): string {
-  const dateF = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz,
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
-  return `${dateF.format(new Date(startsIso))} → ${dateF.format(new Date(endsIso))}`;
+interface Outcome {
+  summary: string;
+  bookings: ReturnType<typeof affectedBookingLine>[];
+  warning: string | null;
 }
 
 export function ClosuresManager({
   venueId,
   timezone,
+  currency,
   courts,
   closures,
 }: {
   venueId: string;
   timezone: string;
+  currency: string;
   courts: Court[];
   closures: Closure[];
 }) {
@@ -65,50 +58,59 @@ export function ClosuresManager({
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [outcome, setOutcome] = useState<Outcome | null>(null);
 
   const courtName = (id: string | null) =>
     id === null ? 'Whole venue' : courts.find((c) => c.id === id)?.name ?? 'Court';
 
   async function addClosure() {
     setError(null);
-    const startUtc = localInputToUtc(startVal, timezone);
-    const endUtc = localInputToUtc(endVal, timezone);
-    if (!startUtc || !endUtc) {
-      setError('Pick a start and end.');
-      return;
-    }
-    if (endUtc <= startUtc) {
-      setError('End must be after start.');
+    setOutcome(null);
+    const req = closureRequest({ courtId, start: startVal, end: endVal, reason }, timezone);
+    if (!req.ok) {
+      setError(req.error);
       return;
     }
     setBusy(true);
     const supabase = createClient();
 
-    const { error: insErr } = await supabase.from('venue_closures').insert({
-      venue_id: venueId,
-      court_id: courtId || null,
-      starts_at: startUtc.toISOString(),
-      ends_at: endUtc.toISOString(),
-      reason: reason || null,
+    // One RPC does it all in one transaction: closure row, slots closed,
+    // bookings cancelled, full refunds queued for the paid ones.
+    const { data, error: rpcErr } = await supabase.rpc('create_venue_closure', {
+      _venue_id: venueId,
+      ...req.args,
     });
-    if (insErr) {
-      setError(insErr.message);
+    const result = rpcErr ? null : readClosureResult(data);
+    if (rpcErr || !result) {
+      setError(rpcErr?.message ?? 'The closure was not saved. Please try again.');
       setBusy(false);
       return;
     }
 
-    // Close any currently-OPEN slots that fall inside the window. Booked/held
-    // slots are left for the owner to handle (cancel/refund).
-    let upd = supabase
-      .from('venue_slots')
-      .update({ status: 'closed' })
-      .eq('venue_id', venueId)
-      .eq('status', 'available')
-      .lt('starts_at', endUtc.toISOString())
-      .gt('ends_at', startUtc.toISOString());
-    if (courtId) upd = upd.eq('court_id', courtId);
-    await upd;
+    let warning: string | null = null;
+    let bookings: Outcome['bookings'] = [];
+    if (result.refundedBookingIds.length > 0) {
+      // Send the queued refunds now. If this fails they stay queued.
+      const { error: fnErr } = await supabase.functions.invoke('payments-process-refunds');
+      warning = refundWarning(fnErr);
 
+      const { data: rows, error: listErr } = await supabase
+        .from('venue_bookings')
+        .select(
+          'id, total_cents, party_size, captain:profiles!captain_user_id(display_name, email), slot:venue_slots(starts_at, ends_at, court:venue_courts(name))',
+        )
+        .in('id', result.refundedBookingIds);
+      if (listErr) {
+        warning = [warning, `Could not load the cancelled bookings (${listErr.message}); see Bookings.`]
+          .filter(Boolean)
+          .join(' ');
+      }
+      bookings = ((rows ?? []) as unknown as AffectedBooking[]).map((b) =>
+        affectedBookingLine(b, timezone, currency),
+      );
+    }
+
+    setOutcome({ summary: closureSummary(result), bookings, warning });
     setBusy(false);
     setStartVal('');
     setEndVal('');
@@ -117,16 +119,50 @@ export function ClosuresManager({
   }
 
   async function remove(id: string) {
-    if (!confirm('Remove this closure? (Slots already closed stay closed.)')) return;
+    if (!confirm('Remove this closure? Slots it closed stay closed, and cancelled bookings stay cancelled.')) return;
     setBusy(true);
+    setError(null);
     const supabase = createClient();
-    await supabase.from('venue_closures').delete().eq('id', id);
+    const { error: delErr } = await supabase.from('venue_closures').delete().eq('id', id);
     setBusy(false);
+    if (delErr) {
+      setError(delErr.message);
+      return;
+    }
     router.refresh();
   }
 
   return (
     <div className="space-y-5">
+      {/* Result of the last closure */}
+      {outcome && (
+        <div className="card-base p-4">
+          <div className="flex items-start justify-between gap-3">
+            <p className="text-sm text-ink">{outcome.summary}</p>
+            <Button variant="ghost" size="icon" onClick={() => setOutcome(null)} title="Dismiss">
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+          {outcome.bookings.length > 0 && (
+            <ul className="mt-3 divide-y divide-line/40 text-sm">
+              {outcome.bookings.map((b) => (
+                <li key={b.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                  <div className="min-w-0">
+                    <p className="text-ink">{b.who}</p>
+                    <p className="text-xs text-ink-dim">
+                      {b.when}
+                      {b.where && ` · ${b.where}`}
+                    </p>
+                  </div>
+                  <Badge tone="warn">Refund {b.refund}</Badge>
+                </li>
+              ))}
+            </ul>
+          )}
+          {outcome.warning && <p className="mt-3 text-xs text-warn">{outcome.warning}</p>}
+        </div>
+      )}
+
       {/* Existing */}
       {closures.length > 0 && (
         <ul className="card-base divide-y divide-line/40 p-0">
@@ -185,7 +221,10 @@ export function ClosuresManager({
             <Input id="closure-end" type="datetime-local" value={endVal} onChange={(e) => setEndVal(e.target.value)} />
           </div>
         </div>
-        <p className="mt-2 text-[11px] text-ink-mute">Times are in your venue timezone ({timezone}).</p>
+        <p className="mt-2 text-[11px] text-ink-mute">
+          Times are in your venue timezone ({timezone}). Paid bookings in the window are cancelled
+          with a full refund.
+        </p>
         {error && <p className="mt-2 text-xs text-danger">{error}</p>}
         <div className="mt-4 flex justify-end">
           <Button onClick={addClosure} disabled={busy}>

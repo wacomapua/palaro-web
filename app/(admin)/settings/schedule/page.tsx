@@ -31,7 +31,7 @@ export default async function ScheduleSettings() {
 
   const { data: courts } = await supabase
     .from('venue_courts')
-    .select('id, sport, name, active')
+    .select('id, sport, name, active, metadata')
     .eq('venue_id', venue.id)
     .order('sort_order');
 
@@ -51,15 +51,17 @@ export default async function ScheduleSettings() {
       <div>
         <h1 className="text-3xl font-medium tracking-tight">Schedule</h1>
         <p className="mt-1 text-sm text-ink-dim">
-          Set weekly opening hours, slot length, and pricing per sport, then generate bookable
-          slots in bulk — all in your venue&apos;s timezone ({venue.timezone}).
+          Set weekly opening hours, slot length, and pricing for each group of courts (a golf
+          course and its range bays are set separately), then generate bookable slots in bulk.
+          All times are in your venue&apos;s timezone ({venue.timezone}).
         </p>
         <div className="mt-8">
           <ScheduleEditor
             venueId={venue.id}
             currency={venue.currency}
+            timezone={venue.timezone}
             sports={sports}
-            courts={(courts ?? []).filter((c) => c.active)}
+            courts={courts ?? []}
             templates={templates ?? []}
           />
         </div>
@@ -68,13 +70,15 @@ export default async function ScheduleSettings() {
       <div>
         <h2 className="text-xl font-medium tracking-tight">Closures &amp; blackout dates</h2>
         <p className="mt-1 text-sm text-ink-dim">
-          Block off dates for maintenance, private events, or holidays. Generated slots skip
-          these, and existing open slots in the window are closed.
+          Block off dates for maintenance, private events, or holidays. Every slot in the window
+          is closed (a court closure also covers the courts it contains or belongs to), paid
+          bookings are cancelled with a full refund, and generated slots skip it.
         </p>
         <div className="mt-6">
           <ClosuresManager
             venueId={venue.id}
             timezone={venue.timezone}
+            currency={venue.currency}
             courts={courts ?? []}
             closures={closures ?? []}
           />
