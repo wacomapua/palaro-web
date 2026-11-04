@@ -9,6 +9,11 @@
 //   2. queue first: the reinstate waits, then sees the refund and returns
 //      NULL (the booking stays cancelled and is refunded).
 // Either way the intent has exactly one transactions row.
+//
+// C12 c: two deliveries of a late "paid" event for an event slot intent with
+// no payment row both call queue_event_slot_refund. Its advisory lock on the
+// intent makes the second wait and find the first's rows:
+//   3. one refund and one transactions row for the intent, never two.
 import { connect } from './sessions.mjs';
 
 const { sql, rows, session, idleInTx, waitingOnLock, check, report } = connect('latepay');
@@ -78,9 +83,31 @@ const state = (booking, intent) =>
   check(got === 'cancelled:1:1', '2: booking cancelled, one refund, one transactions row (the payment)', `got ${got}`);
 }
 
+// ---- 3. two queue_event_slot_refund calls for one intent ------------------
+const intent3 = `pi_race_slot_${venue}`;
+const queueSlot = `select public.queue_event_slot_refund('${intent3}', 20000, '${captain}', 'late_payment');`;
+{
+  const a = session('e1');
+  a.send(`begin; set local role service_role; ${queueSlot} set application_name = '${a.app}_held';`);
+  const held = await idleInTx(`${a.app}_held`);
+  const first = held ? await a.output() : '';
+  check(/^[0-9a-f-]{36}$/.test(first), '3: delivery A queues the event slot refund (not yet committed)', a.out);
+  const b = session('e2');
+  b.send(`set role service_role; ${queueSlot}`);
+  const waited = held && (await waitingOnLock(b.app));
+  check(waited, "3: delivery B's call waits for A's", b.out);
+  await a.end('commit;');
+  const bStatus = await b.end();
+  check(bStatus === 0 && (await b.output()) === first, '3: then returns the same refund', b.out);
+  const got = rows(`select concat_ws(':',
+      (select count(*) from public.venue_refunds where paymongo_intent_id = '${intent3}'),
+      (select count(*) from public.transactions where gateway_ref = '${intent3}'))`);
+  check(got === '1:1', '3: one refund and one transactions row for the intent', `got ${got}`);
+}
+
 const cleanup = sql(`
-  delete from public.venue_refunds where booking_id in ('${b1}', '${b2}');
-  delete from public.transactions where gateway_ref in ('${intent1}', '${intent2}');
+  delete from public.venue_refunds where booking_id in ('${b1}', '${b2}') or paymongo_intent_id = '${intent3}';
+  delete from public.transactions where gateway_ref in ('${intent1}', '${intent2}', '${intent3}');
   delete from public.venue_bookings where id in ('${b1}', '${b2}');
   delete from public.venue_slots where id in ('${s1}', '${s2}');
   delete from public.venues where id = '${venue}';

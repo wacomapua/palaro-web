@@ -3,7 +3,7 @@
 -- as book_venue_slot, when the slot still has room; otherwise it returns NULL
 -- (never raises for "no room") so payments-webhook refunds in full.
 begin;
-select plan(40);
+select plan(44);
 
 select tests.create_user() as owner \gset
 select tests.create_user() as player \gset
@@ -168,6 +168,17 @@ select coalesce(r.id::text, 'null') as r_taken from public.reinstate_venue_booki
 reset role;
 select is(:'r_taken'::text, 'null', 'exclusive slot someone else paid for: NULL');
 
+-- The slot reads available but another booking on it is paid (state left by
+-- an owner edit or a lost update): complete_venue_booking's guard refuses.
+select tests.create_slot(:'venue', :'court_b', :'d'::timestamptz + interval '32 hours', :'d'::timestamptz + interval '33 hours', 100000) as s_inconsistent \gset
+select tests.create_booking(:'s_inconsistent', :'other', 'paid', 1, 100000, 'pi_other_paid') \gset
+select pg_temp.cancelled_booking(:'s_inconsistent', :'player', 1, 100000, 'pi_inconsistent') as b_inconsistent \gset
+set local role service_role;
+select coalesce(r.id::text, 'null') as r_inconsistent from public.reinstate_venue_booking('pi_inconsistent') r \gset
+reset role;
+select is(:'r_inconsistent'::text, 'null', 'available exclusive slot that someone else paid for: NULL');
+select is((select status::text from public.venue_slots where id = :'s_inconsistent'), 'available', 'and the slot is not booked over them');
+
 -- An expired hold does not block (as in book_venue_slot).
 select tests.create_slot(:'venue', :'court_b', :'d'::timestamptz + interval '20 hours', :'d'::timestamptz + interval '21 hours', 100000, null, 'held') as s_stale \gset
 update public.venue_slots set held_until = now() - interval '1 minute' where id = :'s_stale';
@@ -208,6 +219,17 @@ select coalesce(r.id::text, 'null') as r_refunded from public.reinstate_venue_bo
 reset role;
 select is(:'r_refunded'::text, 'null', 'booking with a late_payment refund already queued: NULL even with room');
 select is((select status::text from public.venue_slots where id = :'s_refunded'), 'available', 'and the slot is not taken');
+
+-- A refund queued without any payment row (here: written directly): the
+-- refund guard alone refuses.
+select tests.create_slot(:'venue', :'court_b', :'d'::timestamptz + interval '34 hours', :'d'::timestamptz + interval '35 hours', 100000) as s_refund_only \gset
+select pg_temp.cancelled_booking(:'s_refund_only', :'player', 1, 100000, 'pi_refund_only') as b_refund_only \gset
+insert into public.venue_refunds (booking_id, amount_cents, reason) values (:'b_refund_only', 100000, 'player_cancel');
+set local role service_role;
+select coalesce(r.id::text, 'null') as r_refund_only from public.reinstate_venue_booking('pi_refund_only') r \gset
+reset role;
+select is(:'r_refund_only'::text, 'null', 'a booking with a refund queued and no payment row: NULL');
+select is((select count(*)::int from public.transactions where gateway_ref = 'pi_refund_only'), 0, 'no payment recorded');
 
 -- Paid once, then cancelled (here: a 0% player cancel): never reinstated.
 select tests.create_slot(:'venue', :'court_b', :'d'::timestamptz + interval '26 hours', :'d'::timestamptz + interval '27 hours', 100000) as s_was_paid \gset
