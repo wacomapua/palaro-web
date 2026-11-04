@@ -271,6 +271,10 @@ export type Database = {
         };
         Returns: { closure_id: string; closed_slot_count: number; refunded_booking_ids: string[] }[];
       };
+      swap_venue_court_sort_order: {
+        Args: { _court_id: string; _other_court_id: string };
+        Returns: undefined;
+      };
     };
     Enums: Record<string, never>;
   };

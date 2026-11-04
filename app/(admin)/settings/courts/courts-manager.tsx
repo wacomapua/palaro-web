@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowDown, ArrowUp, Check, ChevronRight, Pencil, Plus, Power, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import { createClient } from '@/lib/supabase/client';
 import { CourtLayoutBuilder } from '@/components/court-layout-builder';
 import { SPORT_CONFIGS } from '@/lib/sport-presets';
+import { compareCourtOrder, moveTarget } from '@/lib/courts';
 import type { VenueSport } from '@/lib/types/db';
 
 interface Court {
@@ -21,6 +22,7 @@ interface Court {
   capacity: number | null;
   active: boolean;
   sort_order: number;
+  created_at: string;
 }
 
 interface CourtTreeNode extends Court {
@@ -44,6 +46,16 @@ export function CourtsManager({
   const [adding, setAdding] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Every move button is disabled while a reorder is saving or any refresh is
+  // still loading: until the new order arrives, the list on screen is stale.
+  const [reordering, setReordering] = useState(false);
+  const [refreshing, startRefresh] = useTransition();
+  const reorderInFlight = useRef(false);
+  const moveLocked = reordering || refreshing;
+
+  function refresh() {
+    startRefresh(() => router.refresh());
+  }
 
   // Group courts into trees, bucketed by sport (roots carry the sport).
   const bySport = useMemo(() => {
@@ -57,8 +69,9 @@ export function CourtsManager({
         roots.push(n);
       }
     });
+    byId.forEach((n) => n.children.sort(compareCourtOrder));
     const map = new Map<VenueSport, CourtTreeNode[]>();
-    for (const r of roots.sort((a, b) => a.sort_order - b.sort_order)) {
+    for (const r of roots.sort(compareCourtOrder)) {
       const arr = map.get(r.sport) ?? [];
       arr.push(r);
       map.set(r.sport, arr);
@@ -88,7 +101,7 @@ export function CourtsManager({
       setError(e.message);
       return;
     }
-    router.refresh();
+    refresh();
   }
 
   async function rename(court: Court, name: string) {
@@ -106,42 +119,32 @@ export function CourtsManager({
       setError(e.message);
       return;
     }
-    router.refresh();
+    refresh();
   }
 
-  // Move a court up/down among its siblings (same parent, same sport). We
-  // reassign the whole sibling group to sequential sort_order so it stays
-  // correct even when legacy rows share values; only changed rows are written.
+  // Move a court one place up or down among its siblings (same parent, same
+  // sport). sort_order is one sequence across the whole venue, so the RPC
+  // swaps the two courts' values in one transaction and nothing else moves.
   async function move(court: Court, dir: -1 | 1) {
-    const siblings = courts
-      .filter((c) => c.parent_court_id === court.parent_court_id && c.sport === court.sport)
-      .sort((a, b) => a.sort_order - b.sort_order);
-    const idx = siblings.findIndex((c) => c.id === court.id);
-    const target = idx + dir;
-    if (idx < 0 || target < 0 || target >= siblings.length) return;
+    if (reorderInFlight.current || moveLocked) return;
+    const otherId = moveTarget(courts, court.id, dir);
+    if (!otherId) return;
 
-    const reordered = [...siblings];
-    [reordered[idx], reordered[target]] = [reordered[target], reordered[idx]];
-    const writes = reordered
-      .map((c, i) => ({ id: c.id, sort_order: i, prev: c.sort_order }))
-      .filter((w) => w.sort_order !== w.prev);
-
-    setBusyId(court.id);
+    reorderInFlight.current = true;
+    setReordering(true);
     setError(null);
     const supabase = createClient();
-    for (const w of writes) {
-      const { error: e } = await supabase
-        .from('venue_courts')
-        .update({ sort_order: w.sort_order })
-        .eq('id', w.id);
-      if (e) {
-        setBusyId(null);
-        setError(e.message);
-        return;
-      }
+    const { error: e } = await supabase.rpc('swap_venue_court_sort_order', {
+      _court_id: court.id,
+      _other_court_id: otherId,
+    });
+    reorderInFlight.current = false;
+    setReordering(false);
+    if (e) {
+      setError(e.message);
+      return;
     }
-    setBusyId(null);
-    router.refresh();
+    refresh();
   }
 
   async function remove(court: CourtTreeNode) {
@@ -162,7 +165,7 @@ export function CourtsManager({
       );
       return;
     }
-    router.refresh();
+    refresh();
   }
 
   return (
@@ -189,6 +192,7 @@ export function CourtsManager({
                         index={i}
                         siblingCount={arr.length}
                         busyId={busyId}
+                        moveLocked={moveLocked}
                         onToggle={toggleActive}
                         onRemove={remove}
                         onRename={rename}
@@ -220,7 +224,7 @@ export function CourtsManager({
             submitLabel="Add courts"
             onCommitted={() => {
               setAdding(false);
-              router.refresh();
+              refresh();
             }}
           />
         </div>
@@ -240,6 +244,7 @@ function CourtRow({
   index,
   siblingCount,
   busyId,
+  moveLocked,
   onToggle,
   onRemove,
   onRename,
@@ -250,6 +255,7 @@ function CourtRow({
   index: number;
   siblingCount: number;
   busyId: string | null;
+  moveLocked: boolean;
   onToggle: (c: Court) => void;
   onRemove: (c: CourtTreeNode) => void;
   onRename: (c: Court, name: string) => void;
@@ -316,7 +322,7 @@ function CourtRow({
             <Button
               variant="ghost"
               size="icon"
-              disabled={busy || index === 0}
+              disabled={moveLocked || busy || index === 0}
               onClick={() => onMove(node, -1)}
               title="Move up"
             >
@@ -325,7 +331,7 @@ function CourtRow({
             <Button
               variant="ghost"
               size="icon"
-              disabled={busy || index === siblingCount - 1}
+              disabled={moveLocked || busy || index === siblingCount - 1}
               onClick={() => onMove(node, 1)}
               title="Move down"
             >
@@ -372,6 +378,7 @@ function CourtRow({
           index={i}
           siblingCount={arr.length}
           busyId={busyId}
+          moveLocked={moveLocked}
           onToggle={onToggle}
           onRemove={onRemove}
           onRename={onRename}

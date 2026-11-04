@@ -30,9 +30,11 @@ export default async function CourtsSettings() {
 
   const { data: courts } = await supabase
     .from('venue_courts')
-    .select('id, venue_id, parent_court_id, sport, name, kind, capacity, active, sort_order')
+    .select('id, venue_id, parent_court_id, sport, name, kind, capacity, active, sort_order, created_at')
     .eq('venue_id', venue.id)
-    .order('sort_order');
+    .order('sort_order')
+    .order('created_at')
+    .order('id');
 
   const maxSortOrder = (courts ?? []).reduce((m, c) => Math.max(m, c.sort_order), -1);
 

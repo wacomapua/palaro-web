@@ -14,6 +14,9 @@
 --          policy in force now, so later edits do not change them either.
 --      Both functions are redefined from their 20260531000001 versions with
 --      only those changes.
+--   2. swap_venue_court_sort_order (PR #8 review, finding 4): a court move
+--      swaps two sibling courts' sort_order in one owner checked transaction
+--      (section 4).
 
 -- =============================================================================
 -- 1. Column and backfill
@@ -301,3 +304,85 @@ begin
   return query select _booking.id, _refund_amt, _hours_before;
 end;
 $$;
+
+-- =============================================================================
+-- 4. swap_venue_court_sort_order
+-- =============================================================================
+-- venue_courts.sort_order is one sequence across the whole venue: the layout
+-- builder numbers every sport in one run and the calendar orders all roots by
+-- it. A move therefore swaps the two courts' existing values and no other
+-- court changes. The courts must be siblings: same venue, same parent, same
+-- sport. If the venue holds duplicate values (the earlier per group
+-- renumbering left some), the whole venue is first renumbered 0..n-1 in its
+-- current order (sort_order, created_at, id; the courts page sorts the same
+-- way). Every court row of the venue is locked before anything is read for
+-- the swap, so concurrent moves run one after the other.
+create or replace function public.swap_venue_court_sort_order(
+  _court_id uuid,
+  _other_court_id uuid
+) returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  _venue_id uuid;
+  _a public.venue_courts;
+  _b public.venue_courts;
+begin
+  if _court_id is null or _other_court_id is null or _court_id = _other_court_id then
+    raise exception 'Pick two different courts to swap' using errcode = 'invalid_parameter_value';
+  end if;
+
+  select c.venue_id into _venue_id from public.venue_courts c where c.id = _court_id;
+  if _venue_id is null then
+    raise exception 'Court not found' using errcode = 'no_data_found';
+  end if;
+
+  if not public.is_venue_owner(_venue_id) then
+    raise exception 'Not authorized to reorder these courts' using errcode = 'insufficient_privilege';
+  end if;
+
+  perform 1 from public.venue_courts c where c.venue_id = _venue_id order by c.id for update;
+
+  select c.* into _a from public.venue_courts c where c.id = _court_id;
+  select c.* into _b from public.venue_courts c where c.id = _other_court_id;
+  if _a.id is null or _b.id is null then
+    raise exception 'Court not found' using errcode = 'no_data_found';
+  end if;
+
+  if _b.venue_id <> _a.venue_id
+     or _b.parent_court_id is distinct from _a.parent_court_id
+     or _b.sport <> _a.sport then
+    raise exception 'Only courts in the same list can swap places'
+      using errcode = 'invalid_parameter_value';
+  end if;
+
+  if exists (
+    select 1 from public.venue_courts c
+     where c.venue_id = _venue_id
+     group by c.sort_order
+    having count(*) > 1
+  ) then
+    update public.venue_courts c
+       set sort_order = r.rn
+      from (
+        select x.id, (row_number() over (order by x.sort_order, x.created_at, x.id) - 1)::int as rn
+          from public.venue_courts x
+         where x.venue_id = _venue_id
+      ) r
+     where c.id = r.id
+       and c.sort_order <> r.rn;
+
+    select c.* into _a from public.venue_courts c where c.id = _court_id;
+    select c.* into _b from public.venue_courts c where c.id = _other_court_id;
+  end if;
+
+  update public.venue_courts c
+     set sort_order = case when c.id = _a.id then _b.sort_order else _a.sort_order end
+   where c.id in (_a.id, _b.id);
+end;
+$$;
+
+revoke execute on function public.swap_venue_court_sort_order(uuid, uuid) from public, anon;
+grant execute on function public.swap_venue_court_sort_order(uuid, uuid) to authenticated, service_role;
