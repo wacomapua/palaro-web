@@ -2,8 +2,9 @@
 -- P4: the database side of late payments, refunds and booking security that
 -- the team-manager app and its edge functions call.
 --
---   1. venue_slots_remaining(uuid[]) (C5): venue_slot_remaining for up to 500
---      slots in one call, for the tee sheet.
+--   1. venue_bookings(slot_id) index, and venue_slots_remaining(uuid[]) (C5):
+--      venue_slot_remaining for up to 500 slots in one call, for the tee
+--      sheet.
 --   2. release_held_booking_admin (C11): frees an exclusive slot only when
 --      the hold is this booking's, and reopens a shared tee time that is no
 --      longer full.
@@ -23,8 +24,15 @@
 --   7. pg_cron: installed here and both release jobs (re)scheduled by name.
 
 -- =============================================================================
--- 1. venue_slots_remaining (C5)
+-- 1. venue_bookings(slot_id) index; venue_slots_remaining (C5)
 -- =============================================================================
+-- Capacity counts (book_venue_slot, check_slot_capacity, venue_slot_remaining,
+-- venue_slots_remaining), releases (release_held_booking_admin,
+-- release_stale_shared_bookings every minute) and reinstate_venue_booking all
+-- find bookings by slot, and nothing indexed slot_id: at 200k bookings
+-- release_stale_shared_bookings took 42 s per run, 12 ms with this index.
+create index if not exists venue_bookings_slot_id_idx on public.venue_bookings (slot_id);
+
 -- Same numbers as venue_slot_remaining (20260529000002):
 --   shared    -> max_players minus the party sizes of pending_payment, paid
 --                and completed bookings, floored at 0

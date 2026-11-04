@@ -3,7 +3,7 @@
 -- per known slot, at most 500 ids per call, callable by anon and
 -- authenticated.
 begin;
-select plan(11);
+select plan(12);
 
 select tests.create_user() as owner \gset
 select tests.create_user() as player \gset
@@ -71,6 +71,10 @@ select throws_ok($$select * from public.venue_slots_remaining(array(select gen_r
   '22023', null, '501 ids are rejected');
 
 select is((select provolatile from pg_proc where oid = 'public.venue_slots_remaining(uuid[])'::regprocedure), 's', 'declared stable');
+-- Every capacity read, release and reinstatement looks bookings up by slot
+-- (review finding 3: release_stale_shared_bookings 42 s to 12 ms at 200k).
+select has_index('public', 'venue_bookings', 'venue_bookings_slot_id_idx', array['slot_id'],
+  'venue_bookings is indexed on slot_id');
 
 -- Callable by the app before and after sign in; bookings stay hidden by RLS
 -- but the counts are right.
