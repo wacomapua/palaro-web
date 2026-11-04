@@ -5,7 +5,9 @@
 // 2. Applies scripts/test-db/bootstrap.sql as supabase_admin (the bits of the
 //    auth schema that hosted GoTrue owns, plus pgTAP).
 // 3. Applies supabase/migrations/*.sql in file name order as postgres, each in
-//    its own transaction (as the Supabase CLI does).
+//    its own transaction (as the Supabase CLI does). Before a migration V,
+//    supabase/tests/premigrate/V (if present) runs the same way, so tests can
+//    seed the data a migration has to carry forward.
 // 4. Applies supabase/tests/setup/*.sql (shared fixture helpers).
 // 5. Runs every supabase/tests/*.test.sql through psql and fails on any
 //    `not ok`, a plan mismatch, or any SQL error.
@@ -17,7 +19,7 @@
 // ever touched: every docker command names this run's container explicitly.
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -26,6 +28,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const MIGRATIONS = join(ROOT, 'supabase', 'migrations');
 const TESTS = join(ROOT, 'supabase', 'tests');
 const SETUP = join(TESTS, 'setup');
+const PREMIGRATE = join(TESTS, 'premigrate');
 const BOOTSTRAP = join(ROOT, 'scripts', 'test-db', 'bootstrap.sql');
 
 // Parses psql's TAP output for one test file.
@@ -59,6 +62,12 @@ export function sessionTestFiles(dir) {
   return readdirSync(dir)
     .filter((f) => f.endsWith('.test.mjs') && statSync(join(dir, f)).isFile())
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+// Seed file to run just before migration `name`, or null.
+export function premigrateSeed(dir, name) {
+  const path = join(dir, name);
+  return existsSync(path) && statSync(path).isFile() ? path : null;
 }
 
 function docker(args, opts = {}) {
@@ -128,6 +137,8 @@ function main() {
     applyOrDie('bootstrap.sql', 'supabase_admin', readFileSync(BOOTSTRAP, 'utf8'));
     const migrations = migrationFiles(MIGRATIONS);
     for (const f of migrations) {
+      const seed = premigrateSeed(PREMIGRATE, f);
+      if (seed) applyOrDie(`premigrate/${f}`, 'postgres', readFileSync(seed, 'utf8'), ['--single-transaction']);
       applyOrDie(f, 'postgres', readFileSync(join(MIGRATIONS, f), 'utf8'), ['--single-transaction']);
     }
     console.log(`# applied ${migrations.length} migrations`);

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluateTap, migrationFiles, sessionTestFiles } from '../scripts/test-db.mjs';
+import { evaluateTap, migrationFiles, premigrateSeed, sessionTestFiles } from '../scripts/test-db.mjs';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -66,6 +66,20 @@ test('session tests are the node scripts in supabase/tests, in file name order',
     }
     mkdirSync(join(dir, 'setup'));
     assert.deepEqual(sessionTestFiles(dir), ['a_locks.test.mjs', 'b_locks.test.mjs']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('finds the premigrate seed named after a migration, if any', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pre-'));
+  try {
+    writeFileSync(join(dir, '20260531000001_x.sql'), 'select 1;');
+    mkdirSync(join(dir, '20260531000002_dir.sql'));
+    assert.equal(premigrateSeed(dir, '20260531000001_x.sql'), join(dir, '20260531000001_x.sql'));
+    assert.equal(premigrateSeed(dir, '20260531000002_dir.sql'), null, 'a directory is not a seed');
+    assert.equal(premigrateSeed(dir, '0001_initial_schema.sql'), null);
+    assert.equal(premigrateSeed(join(dir, 'missing'), '20260531000001_x.sql'), null, 'no premigrate directory at all');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
