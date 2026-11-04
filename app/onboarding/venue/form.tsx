@@ -8,6 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { createClient } from '@/lib/supabase/client';
 import { SPORT_CONFIGS } from '@/lib/sport-presets';
+import { COMMON_TIMEZONES } from '@/lib/tz';
 import type { VenueSport } from '@/lib/types/db';
 
 interface VenueInitial {
@@ -20,6 +21,7 @@ interface VenueInitial {
   city: string;
   phone: string;
   description: string;
+  timezone?: string;
 }
 
 function slugify(s: string): string {
@@ -42,6 +44,7 @@ export function VenueForm({ initial }: { initial: VenueInitial | null }) {
   const [city, setCity] = useState(initial?.city ?? 'Manila');
   const [phone, setPhone] = useState(initial?.phone ?? '');
   const [description, setDescription] = useState(initial?.description ?? '');
+  const [timezone, setTimezone] = useState(initial?.timezone ?? 'Asia/Manila');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -104,6 +107,7 @@ export function VenueForm({ initial }: { initial: VenueInitial | null }) {
       city: city || null,
       phone: phone || null,
       description: description || null,
+      timezone,
     };
 
     let venueId = initial?.id;
@@ -251,6 +255,26 @@ export function VenueForm({ initial }: { initial: VenueInitial | null }) {
             onChange={(e) => setPhone(e.target.value)}
           />
         </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="timezone">Timezone</Label>
+        <select
+          id="timezone"
+          className="input-base"
+          value={timezone}
+          onChange={(e) => setTimezone(e.target.value)}
+        >
+          {COMMON_TIMEZONES.map((t) => (
+            <option key={t.value} value={t.value}>
+              {t.label}
+            </option>
+          ))}
+        </select>
+        <p className="text-xs text-ink-mute">
+          Opening hours and slot times are in this timezone, so bookings show correctly no
+          matter where you manage from.
+        </p>
       </div>
 
       <div className="space-y-1.5">

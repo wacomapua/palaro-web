@@ -87,6 +87,9 @@ export type Venue = {
   owner_id: string;
   status: VenueStatus;
   currency: string;
+  // IANA timezone the venue operates in (e.g. 'Asia/Manila'). All slot day/time
+  // math is anchored to this, not the server or browser timezone.
+  timezone: string;
   payout_method: PayoutMethod | null;
   default_refund_policy: RefundPolicy;
   created_at: string;

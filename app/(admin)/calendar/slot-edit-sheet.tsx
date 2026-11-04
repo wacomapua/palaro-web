@@ -7,9 +7,28 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { createClient } from '@/lib/supabase/client';
-import { formatMoney, formatDateTime } from '@/lib/format';
+import { formatMoney } from '@/lib/format';
+import { zonedTimeToUtc, tzParts, formatTimeInTz, formatYmd } from '@/lib/tz';
 import type { CourtSlotModel } from '@/lib/sport-presets';
 import type { VenueCourt, VenueSlot } from '@/lib/types/db';
+
+// "HH:MM" wall-clock time on a venue-local day → UTC instant.
+function localTimeToUtc(dayYmd: string, hhmm: string, tz: string): Date {
+  const [y, mo, d] = dayYmd.split('-').map(Number);
+  const [h, m] = hhmm.split(':').map(Number);
+  return zonedTimeToUtc(y, mo, d, h, m, tz);
+}
+
+function hhmm(totalMinutes: number): string {
+  const t = Math.max(0, Math.min(totalMinutes, 23 * 60 + 59));
+  return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+}
+
+// HH:MM of a slot timestamp as seen in the venue timezone.
+function slotHHMM(iso: string, tz: string): string {
+  const p = tzParts(new Date(iso), tz);
+  return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`;
+}
 
 type Editing =
   | { kind: 'new'; courtId: string; hour: number }
@@ -51,7 +70,8 @@ function readSlotModel(court: VenueCourt | null | undefined): CourtSlotModel {
 export function SlotEditSheet({
   venueId,
   editing,
-  date,
+  dayYmd,
+  timezone,
   courts,
   existingSlot,
   existingBookings,
@@ -61,7 +81,8 @@ export function SlotEditSheet({
 }: {
   venueId: string;
   editing: Editing;
-  date: Date;
+  dayYmd: string;
+  timezone: string;
   courts: VenueCourt[];
   existingSlot: VenueSlot | null;
   existingBookings: SlotBooking[];
@@ -85,7 +106,8 @@ export function SlotEditSheet({
         venueId={venueId}
         court={court}
         model={model}
-        date={date}
+        dayYmd={dayYmd}
+        timezone={timezone}
         editing={editing as { kind: 'new'; courtId: string; hour: number }}
         currency={currency}
         onClose={onClose}
@@ -99,7 +121,8 @@ export function SlotEditSheet({
       venueId={venueId}
       court={court ?? null}
       model={model}
-      date={date}
+      dayYmd={dayYmd}
+      timezone={timezone}
       editing={editing}
       existingSlot={existingSlot}
       existingBookings={existingBookings}
@@ -117,7 +140,8 @@ function TeeSheetGenerator({
   venueId,
   court,
   model,
-  date,
+  dayYmd,
+  timezone,
   editing,
   currency,
   onClose,
@@ -126,7 +150,8 @@ function TeeSheetGenerator({
   venueId: string;
   court: VenueCourt;
   model: CourtSlotModel;
-  date: Date;
+  dayYmd: string;
+  timezone: string;
   editing: { kind: 'new'; courtId: string; hour: number };
   currency: string;
   onClose: () => void;
@@ -141,9 +166,8 @@ function TeeSheetGenerator({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const dayMid = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  const starts = mergeDateTime(dayMid, startTime);
-  const ends = mergeDateTime(dayMid, endTime);
+  const starts = localTimeToUtc(dayYmd, startTime, timezone);
+  const ends = localTimeToUtc(dayYmd, endTime, timezone);
   const teeTimes = enumerateTeeTimes(starts, ends, interval);
 
   async function generate() {
@@ -185,7 +209,7 @@ function TeeSheetGenerator({
         <SheetHeader>
           <SheetTitle>Generate tee sheet</SheetTitle>
           <SheetDescription>
-            {court.name} · {formatDateTime(date)}
+            {court.name} · {formatYmd(dayYmd)}
           </SheetDescription>
         </SheetHeader>
 
@@ -252,7 +276,8 @@ function TeeSheetGenerator({
             {teeTimes.length > 0 && (
               <span className="text-ink-dim">
                 {' '}
-                ({fmtTime(teeTimes[0])} → {fmtTime(teeTimes[teeTimes.length - 1])})
+                ({formatTimeInTz(teeTimes[0], timezone)} →{' '}
+                {formatTimeInTz(teeTimes[teeTimes.length - 1], timezone)})
               </span>
             )}
             .
@@ -281,7 +306,8 @@ function SingleSlotEditor({
   venueId,
   court,
   model,
-  date,
+  dayYmd,
+  timezone,
   editing,
   existingSlot,
   existingBookings,
@@ -292,7 +318,8 @@ function SingleSlotEditor({
   venueId: string;
   court: VenueCourt | null;
   model: CourtSlotModel;
-  date: Date;
+  dayYmd: string;
+  timezone: string;
   editing: Editing;
   existingSlot: VenueSlot | null;
   existingBookings: SlotBooking[];
@@ -305,17 +332,17 @@ function SingleSlotEditor({
   const shared = existingSlot ? existingSlot.booking_mode === 'shared' : model.bookingMode === 'shared';
 
   const durationMin = model.defaultDurationMinutes || 120;
-  // New slots seed from the clicked hour; existing slots from their own times.
+  // New slots seed from the clicked hour; existing slots from their own times
+  // (rendered in the venue timezone).
   const clickedHour = editing.kind === 'new' ? editing.hour : 0;
-  const start0 = existingSlot
-    ? new Date(existingSlot.starts_at)
-    : new Date(date.getFullYear(), date.getMonth(), date.getDate(), clickedHour, 0);
-  const end0 = existingSlot
-    ? new Date(existingSlot.ends_at)
-    : new Date(start0.getTime() + durationMin * 60_000);
-
-  const [startTime, setStartTime] = useState(toLocalTime(start0));
-  const [endTime, setEndTime] = useState(toLocalTime(end0));
+  const [startTime, setStartTime] = useState(
+    existingSlot ? slotHHMM(existingSlot.starts_at, timezone) : hhmm(clickedHour * 60),
+  );
+  const [endTime, setEndTime] = useState(
+    existingSlot
+      ? slotHHMM(existingSlot.ends_at, timezone)
+      : hhmm(clickedHour * 60 + durationMin),
+  );
 
   const seedPrice = perPlayer
     ? existingSlot?.price_per_player_cents ?? existingSlot?.price_cents ?? 150_000
@@ -337,9 +364,8 @@ function SingleSlotEditor({
     setError(null);
 
     const supabase = createClient();
-    const dayMid = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-    const starts = mergeDateTime(dayMid, startTime);
-    const ends = mergeDateTime(dayMid, endTime);
+    const starts = localTimeToUtc(dayYmd, startTime, timezone);
+    const ends = localTimeToUtc(dayYmd, endTime, timezone);
 
     if (ends <= starts) {
       setError('End time must be after start time');
@@ -410,7 +436,7 @@ function SingleSlotEditor({
         <SheetHeader>
           <SheetTitle>{isNew ? 'New slot' : shared ? 'Tee time' : 'Edit slot'}</SheetTitle>
           <SheetDescription>
-            {court?.name ?? 'Court'} · {formatDateTime(date)}
+            {court?.name ?? 'Court'} · {formatYmd(dayYmd)}
           </SheetDescription>
         </SheetHeader>
 
@@ -545,17 +571,3 @@ function enumerateTeeTimes(start: Date, end: Date, intervalMin: number): Date[] 
   return out;
 }
 
-function fmtTime(d: Date): string {
-  return `${d.getHours()}:${d.getMinutes().toString().padStart(2, '0')}`;
-}
-
-function toLocalTime(d: Date): string {
-  return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
-}
-
-function mergeDateTime(day: Date, hhmm: string): Date {
-  const [h, m] = hhmm.split(':').map(Number);
-  const out = new Date(day);
-  out.setHours(h, m, 0, 0);
-  return out;
-}
