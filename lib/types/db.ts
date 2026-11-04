@@ -193,6 +193,24 @@ export type VenueClosure = {
   created_at: string;
 }
 
+// Refund queue (C1). Rows are written by definer functions (closures, late
+// payments) and sent by the payments-process-refunds edge function.
+export type VenueRefundReason = 'venue_closure' | 'late_payment' | 'player_cancel';
+export type VenueRefundStatus = 'pending' | 'processing' | 'succeeded' | 'failed';
+
+export type VenueRefund = {
+  id: string;
+  booking_id: string;
+  amount_cents: number;
+  reason: VenueRefundReason;
+  status: VenueRefundStatus;
+  paymongo_refund_id: string | null;
+  last_error: string | null;
+  attempts: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export type VenuePayout = {
   id: string;
   venue_id: string;
@@ -228,6 +246,7 @@ export type Database = {
       venue_closures: TableShape<VenueClosure>;
       venue_bookings: TableShape<VenueBooking>;
       venue_payouts: TableShape<VenuePayout>;
+      venue_refunds: TableShape<VenueRefund>;
     };
     Views: Record<string, never>;
     Functions: {
@@ -238,6 +257,16 @@ export type Database = {
       replace_venue_slot_templates: {
         Args: { _venue_id: string; _sport: VenueSport; _booking_mode: BookingMode; _templates: Json };
         Returns: number;
+      };
+      create_venue_closure: {
+        Args: {
+          _venue_id: string;
+          _court_id: string | null;
+          _starts_at: string;
+          _ends_at: string;
+          _reason: string | null;
+        };
+        Returns: { closure_id: string; closed_slot_count: number; refunded_booking_ids: string[] }[];
       };
     };
     Enums: Record<string, never>;

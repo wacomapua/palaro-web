@@ -70,13 +70,15 @@ export default async function ScheduleSettings() {
       <div>
         <h2 className="text-xl font-medium tracking-tight">Closures &amp; blackout dates</h2>
         <p className="mt-1 text-sm text-ink-dim">
-          Block off dates for maintenance, private events, or holidays. Generated slots skip
-          these, and existing open slots in the window are closed.
+          Block off dates for maintenance, private events, or holidays. Every slot in the window
+          is closed (a court closure also covers the courts it contains or belongs to), paid
+          bookings are cancelled with a full refund, and generated slots skip it.
         </p>
         <div className="mt-6">
           <ClosuresManager
             venueId={venue.id}
             timezone={venue.timezone}
+            currency={venue.currency}
             courts={courts ?? []}
             closures={closures ?? []}
           />
