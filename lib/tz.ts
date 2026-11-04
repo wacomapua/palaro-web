@@ -116,11 +116,14 @@ export function formatTimeInTz(date: Date, tz: string): string {
   }).format(date);
 }
 
-// A long human date for a "YYYY-MM-DD" (rendered tz-agnostically at noon UTC to
-// avoid any edge slippage).
+// A long human date for a "YYYY-MM-DD". The string is already a calendar date,
+// so it is built as a UTC instant and formatted in UTC. Formatting in the
+// runtime's own zone would show the next day in browsers at UTC+12 or later and
+// make server and client markup disagree.
 export function formatYmd(ymd: string): string {
   const [y, mo, d] = ymd.split('-').map(Number);
   return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
     weekday: 'short',
     month: 'short',
     day: 'numeric',
