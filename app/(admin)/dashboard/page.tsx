@@ -1,11 +1,13 @@
 import Link from 'next/link';
 import { ArrowRight } from 'lucide-react';
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
 import { redirect } from 'next/navigation';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { formatMoney, formatDateTime } from '@/lib/format';
+import { DEFAULT_TIMEZONE, dayRangeUtc, weekStartYmd, ymdInTz } from '@/lib/tz';
 
 export default async function DashboardPage() {
   const supabase = await createClient();
@@ -14,17 +16,19 @@ export default async function DashboardPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const { data: venues } = await supabase
-    .from('venues')
-    .select('id, currency')
-    .eq('owner_id', user.id);
+  const venues = dataOrThrow(
+    await supabase.from('venues').select('id, currency, timezone').eq('owner_id', user.id),
+    'venue',
+  );
   const venue = venues?.[0];
   if (!venue) redirect('/onboarding/profile');
 
+  // "Today" and "this week" are venue days, not server days.
+  const tz = venue.timezone || DEFAULT_TIMEZONE;
+  const today = ymdInTz(new Date(), tz);
+
   // KPIs: this week's paid bookings, gross, upcoming payout total.
-  const weekStart = new Date();
-  weekStart.setDate(weekStart.getDate() - weekStart.getDay()); // Sunday
-  weekStart.setHours(0, 0, 0, 0);
+  const weekStart = dayRangeUtc(weekStartYmd(today), tz).start; // Sunday
 
   const { data: bookings } = await supabase
     .from('venue_bookings')
@@ -37,10 +41,7 @@ export default async function DashboardPage() {
   const payoutThisWeek = paid.reduce((s, b) => s + b.payout_cents, 0);
 
   // Today's upcoming bookings
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-  const todayEnd = new Date(todayStart);
-  todayEnd.setDate(todayEnd.getDate() + 1);
+  const { start: todayStart, end: todayEnd } = dayRangeUtc(today, tz);
 
   type TodayBookingRow = {
     id: string;
@@ -100,7 +101,7 @@ export default async function DashboardPage() {
                       </p>
                       <p className="text-xs text-ink-dim">
                         {/* deno-lint-ignore no-explicit-any */}
-                        {formatDateTime((b as any).slot.starts_at)}
+                        {formatDateTime((b as any).slot.starts_at, tz)}
                       </p>
                     </div>
                     <div className="flex items-center gap-3">

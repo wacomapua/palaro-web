@@ -100,6 +100,13 @@ export function addDaysYmd(ymd: string, delta: number): string {
   return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
 }
 
+// The Sunday that starts the week containing the given calendar date (weeks
+// run Sunday to Saturday, matching ZonedParts.weekday).
+export function weekStartYmd(ymd: string): string {
+  const [y, mo, d] = ymd.split('-').map(Number);
+  return addDaysYmd(ymd, -new Date(Date.UTC(y, mo - 1, d)).getUTCDay());
+}
+
 // Decimal hour-of-day (e.g. 9.5 for 9:30) of an instant in `tz` — for laying
 // slots out on the calendar grid.
 export function hourInTz(date: Date, tz: string): number {
@@ -116,17 +123,23 @@ export function formatTimeInTz(date: Date, tz: string): string {
   }).format(date);
 }
 
-// A long human date for a "YYYY-MM-DD" (rendered tz-agnostically at noon UTC to
-// avoid any edge slippage).
+// A long human date for a calendar date string. It names a date, not an
+// instant, so it is built as a UTC instant and formatted in UTC. Formatting in
+// the runtime's own zone would show the next day in browsers at UTC+12 or later
+// and make server and client markup disagree.
 export function formatYmd(ymd: string): string {
   const [y, mo, d] = ymd.split('-').map(Number);
   return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
     weekday: 'short',
     month: 'short',
     day: 'numeric',
     year: 'numeric',
   }).format(new Date(Date.UTC(y, mo - 1, d, 12)));
 }
+
+// Fallback when a venue row has no timezone (the column defaults to this).
+export const DEFAULT_TIMEZONE = 'Asia/Manila';
 
 function pad(n: number): string {
   return String(n).padStart(2, '0');
