@@ -316,7 +316,11 @@ $$;
 -- renumbering left some), the whole venue is first renumbered 0..n-1 in its
 -- current order (sort_order, created_at, id; the courts page sorts the same
 -- way). Every court row of the venue is locked before anything is read for
--- the swap, so concurrent moves run one after the other.
+-- the swap, so concurrent moves run one after the other. The lock is FOR NO
+-- KEY UPDATE, not FOR UPDATE: foreign key checks on venue_courts take FOR KEY
+-- SHARE, which FOR UPDATE blocks, so inserting slots or templates for the
+-- venue's courts (generate_venue_slots, replace_venue_slot_templates) could
+-- otherwise wait on a reorder and deadlock with it.
 create or replace function public.swap_venue_court_sort_order(
   _court_id uuid,
   _other_court_id uuid
@@ -343,7 +347,7 @@ begin
     raise exception 'Not authorized to reorder these courts' using errcode = 'insufficient_privilege';
   end if;
 
-  perform 1 from public.venue_courts c where c.venue_id = _venue_id order by c.id for update;
+  perform 1 from public.venue_courts c where c.venue_id = _venue_id order by c.id for no key update;
 
   select c.* into _a from public.venue_courts c where c.id = _court_id;
   select c.* into _b from public.venue_courts c where c.id = _other_court_id;
