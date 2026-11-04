@@ -235,6 +235,10 @@ export type Database = {
         Args: { _venue_id: string; _through: string };
         Returns: number;
       };
+      replace_venue_slot_templates: {
+        Args: { _venue_id: string; _sport: VenueSport; _booking_mode: BookingMode; _templates: Json };
+        Returns: number;
+      };
     };
     Enums: Record<string, never>;
   };

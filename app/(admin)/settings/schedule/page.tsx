@@ -31,7 +31,7 @@ export default async function ScheduleSettings() {
 
   const { data: courts } = await supabase
     .from('venue_courts')
-    .select('id, sport, name, active')
+    .select('id, sport, name, active, metadata')
     .eq('venue_id', venue.id)
     .order('sort_order');
 
@@ -51,15 +51,17 @@ export default async function ScheduleSettings() {
       <div>
         <h1 className="text-3xl font-medium tracking-tight">Schedule</h1>
         <p className="mt-1 text-sm text-ink-dim">
-          Set weekly opening hours, slot length, and pricing per sport, then generate bookable
-          slots in bulk — all in your venue&apos;s timezone ({venue.timezone}).
+          Set weekly opening hours, slot length, and pricing for each group of courts (a golf
+          course and its range bays are set separately), then generate bookable slots in bulk.
+          All times are in your venue&apos;s timezone ({venue.timezone}).
         </p>
         <div className="mt-8">
           <ScheduleEditor
             venueId={venue.id}
             currency={venue.currency}
+            timezone={venue.timezone}
             sports={sports}
-            courts={(courts ?? []).filter((c) => c.active)}
+            courts={courts ?? []}
             templates={templates ?? []}
           />
         </div>

@@ -9,191 +9,125 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { createClient } from '@/lib/supabase/client';
 import { SPORT_CONFIGS } from '@/lib/sport-presets';
-import { addDaysYmd } from '@/lib/tz';
-import type { VenueSport } from '@/lib/types/db';
+import { addDaysYmd, ymdInTz } from '@/lib/tz';
+import {
+  DAYS,
+  GENERATE_MAX_DAYS,
+  GENERATE_MAX_ROWS,
+  buildTemplatePayload,
+  courtGroups,
+  groupLabel,
+  seedWeek,
+  type DaySchedule,
+  type ScheduleCourt,
+  type ScheduleTemplate,
+  type Week,
+} from '@/lib/schedule';
+import type { Json, VenueSport } from '@/lib/types/db';
 
-interface Court {
-  id: string;
-  sport: VenueSport;
-  name: string;
-  active: boolean;
-}
-interface Template {
-  court_id: string;
-  day_of_week: number;
-  start_time: string;
-  end_time: string;
-  slot_minutes: number;
-  price_cents: number;
-  active: boolean;
-}
-
-interface DaySchedule {
-  enabled: boolean;
-  open: string; // HH:MM
-  close: string;
-  slotMinutes: number;
-  price: string; // major units
-}
-
-// Display order Mon → Sun, stored as JS day_of_week (0 = Sun).
-const DAYS = [
-  { dow: 1, label: 'Mon' },
-  { dow: 2, label: 'Tue' },
-  { dow: 3, label: 'Wed' },
-  { dow: 4, label: 'Thu' },
-  { dow: 5, label: 'Fri' },
-  { dow: 6, label: 'Sat' },
-  { dow: 0, label: 'Sun' },
-];
 const WEEKDAYS = [1, 2, 3, 4, 5];
 const WEEKEND = [6, 0];
 
 const SPORT_META = Object.fromEntries(SPORT_CONFIGS.map((c) => [c.sport, c]));
-
-function defaultDay(): DaySchedule {
-  return { enabled: false, open: '09:00', close: '20:00', slotMinutes: 60, price: '1500' };
-}
-
-// Seed a sport's weekly schedule from its representative court's templates.
-function seedSchedule(sport: VenueSport, courts: Court[], templates: Template[]): Record<number, DaySchedule> {
-  const out: Record<number, DaySchedule> = {};
-  for (const { dow } of DAYS) out[dow] = defaultDay();
-  const repCourt = courts.find((c) => c.sport === sport);
-  if (!repCourt) return out;
-  for (const t of templates.filter((t) => t.court_id === repCourt.id && t.active)) {
-    out[t.day_of_week] = {
-      enabled: true,
-      open: t.start_time.slice(0, 5),
-      close: t.end_time.slice(0, 5),
-      slotMinutes: t.slot_minutes,
-      price: String(Math.round(t.price_cents / 100)),
-    };
-  }
-  return out;
-}
+const sportLabel = (s: VenueSport) => SPORT_META[s]?.label ?? s;
 
 export function ScheduleEditor({
   venueId,
   currency,
+  timezone,
   sports,
   courts,
   templates,
 }: {
   venueId: string;
   currency: string;
+  timezone: string;
   sports: VenueSport[];
-  courts: Court[];
-  templates: Template[];
+  courts: ScheduleCourt[];
+  templates: ScheduleTemplate[];
 }) {
   const router = useRouter();
-  const [activeSport, setActiveSport] = useState<VenueSport>(sports[0]);
-  const [schedules, setSchedules] = useState<Record<string, Record<number, DaySchedule>>>(() =>
-    Object.fromEntries(sports.map((s) => [s, seedSchedule(s, courts, templates)])),
+  const groups = useMemo(() => courtGroups(courts, sports), [courts, sports]);
+  const [activeKey, setActiveKey] = useState<string | null>(groups[0]?.key ?? null);
+  const [weeks, setWeeks] = useState<Record<string, Week>>(() =>
+    Object.fromEntries(groups.map((g) => [g.key, seedWeek(g, templates)])),
   );
+  const group = groups.find((g) => g.key === activeKey) ?? groups[0] ?? null;
+  const days = group ? weeks[group.key] : null;
+  const shared = group?.bookingMode === 'shared';
+  const label = group ? groupLabel(group, groups, sportLabel) : '';
+
   // Quick-fill row.
   const [fill, setFill] = useState({ open: '09:00', close: '20:00', slotMinutes: 60, price: '1500' });
-  const [savingSport, setSavingSport] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Generate controls.
-  const [through, setThrough] = useState(() => addDaysYmd(new Date().toISOString().slice(0, 10), 30));
+  // Generate controls, in venue local dates.
+  const today = useMemo(() => ymdInTz(new Date(), timezone), [timezone]);
+  const maxThrough = addDaysYmd(today, GENERATE_MAX_DAYS);
+  const [through, setThrough] = useState(() => addDaysYmd(today, 30));
   const [generating, setGenerating] = useState(false);
   const [genMsg, setGenMsg] = useState<string | null>(null);
+  const [genError, setGenError] = useState<string | null>(null);
 
-  const sportCourts = useMemo(() => courts.filter((c) => c.sport === activeSport), [courts, activeSport]);
-  const days = schedules[activeSport];
-  const isGolf = activeSport === 'golf';
+  function patchWeek(next: (w: Week) => Week) {
+    if (!group) return;
+    setWeeks((m) => ({ ...m, [group.key]: next(m[group.key]) }));
+    setSavedMsg(null);
+  }
 
   function patchDay(dow: number, patch: Partial<DaySchedule>) {
-    setSchedules((m) => ({
-      ...m,
-      [activeSport]: { ...m[activeSport], [dow]: { ...m[activeSport][dow], ...patch } },
-    }));
-    setSavedMsg(null);
+    patchWeek((w) => ({ ...w, [dow]: { ...w[dow], ...patch } }));
   }
 
   function applyFill(dows: number[]) {
-    setSchedules((m) => {
-      const next = { ...m[activeSport] };
-      for (const dow of dows) {
-        next[dow] = {
-          enabled: true,
-          open: fill.open,
-          close: fill.close,
-          slotMinutes: fill.slotMinutes,
-          price: fill.price,
-        };
-      }
-      return { ...m, [activeSport]: next };
+    patchWeek((w) => {
+      const next = { ...w };
+      for (const dow of dows) next[dow] = { enabled: true, ...fill };
+      return next;
     });
-    setSavedMsg(null);
   }
 
-  async function saveSport() {
+  async function save() {
+    if (!group || !days) return;
     setError(null);
     setSavedMsg(null);
-    const courtIds = sportCourts.map((c) => c.id);
-    if (courtIds.length === 0) {
-      setError('No active courts for this sport — add courts first.');
+    // Validate the whole week before anything is sent.
+    const payload = buildTemplatePayload(days);
+    if (!payload.ok) {
+      setError(payload.error);
       return;
     }
-    setSavingSport(true);
+    setSaving(true);
     const supabase = createClient();
-
-    // Replace this sport's templates wholesale.
-    const { error: delErr } = await supabase
-      .from('venue_slot_templates')
-      .delete()
-      .in('court_id', courtIds);
-    if (delErr) {
-      setError(delErr.message);
-      setSavingSport(false);
+    const { error: e } = await supabase.rpc('replace_venue_slot_templates', {
+      _venue_id: venueId,
+      _sport: group.sport,
+      _booking_mode: group.bookingMode,
+      _templates: payload.templates as unknown as Json,
+    });
+    setSaving(false);
+    if (e) {
+      setError(e.message);
       return;
     }
-
-    const rows: Record<string, unknown>[] = [];
-    for (const { dow } of DAYS) {
-      const ds = days[dow];
-      if (!ds.enabled) continue;
-      if (ds.close <= ds.open) {
-        setError(`${labelFor(dow)}: closing time must be after opening time.`);
-        setSavingSport(false);
-        return;
-      }
-      const price_cents = Math.max(0, Math.round((Number(ds.price) || 0) * 100));
-      for (const courtId of courtIds) {
-        rows.push({
-          venue_id: venueId,
-          court_id: courtId,
-          day_of_week: dow,
-          start_time: `${ds.open}:00`,
-          end_time: `${ds.close}:00`,
-          slot_minutes: ds.slotMinutes,
-          price_cents,
-          active: true,
-        });
-      }
-    }
-
-    if (rows.length > 0) {
-      const { error: insErr } = await supabase.from('venue_slot_templates').insert(rows);
-      if (insErr) {
-        setError(insErr.message);
-        setSavingSport(false);
-        return;
-      }
-    }
-    setSavingSport(false);
+    const n = group.courts.length;
     setSavedMsg(
-      `Saved ${SPORT_META[activeSport]?.label ?? activeSport} hours across ${courtIds.length} court${courtIds.length === 1 ? '' : 's'}.`,
+      payload.templates.length === 0
+        ? `Cleared ${label} hours.`
+        : `Saved ${label} hours across ${n} court${n === 1 ? '' : 's'}.`,
     );
+    router.refresh();
   }
 
   async function generate() {
     setGenMsg(null);
-    setError(null);
+    setGenError(null);
+    if (!through || through < today || through > maxThrough) {
+      setGenError(`Pick a date from ${today} to ${maxThrough}.`);
+      return;
+    }
     setGenerating(true);
     const supabase = createClient();
     const { data, error: e } = await supabase.rpc('generate_venue_slots', {
@@ -202,33 +136,45 @@ export function ScheduleEditor({
     });
     setGenerating(false);
     if (e) {
-      setError(e.message);
+      setGenError(e.message);
       return;
     }
     setGenMsg(`Generated ${data ?? 0} new slot${data === 1 ? '' : 's'} through ${through}.`);
     router.refresh();
   }
 
+  if (!group || !days) {
+    return (
+      <div className="card-base p-5 text-sm text-ink-dim">
+        No active courts yet. Add courts in Settings → Courts, then set their weekly hours here.
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
-      {/* Sport tabs */}
-      {sports.length > 1 && (
+      {/* Court group tabs */}
+      {groups.length > 1 && (
         <div className="flex flex-wrap gap-2">
-          {sports.map((s) => {
-            const cfg = SPORT_META[s];
+          {groups.map((g) => {
+            const cfg = SPORT_META[g.sport];
             return (
               <button
                 type="button"
-                key={s}
-                onClick={() => setActiveSport(s)}
+                key={g.key}
+                onClick={() => {
+                  setActiveKey(g.key);
+                  setError(null);
+                  setSavedMsg(null);
+                }}
                 className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-2 text-sm transition-colors ${
-                  s === activeSport
+                  g.key === group.key
                     ? 'border-brand bg-brand/10 text-brand'
                     : 'border-line/70 bg-bg-1 text-ink-dim hover:border-line'
                 }`}
               >
                 <span>{cfg?.emoji}</span>
-                {cfg?.label ?? s}
+                {groupLabel(g, groups, sportLabel)}
               </button>
             );
           })}
@@ -245,10 +191,10 @@ export function ScheduleEditor({
           <Field label="Close">
             <Input type="time" step={300} value={fill.close} onChange={(e) => setFill((f) => ({ ...f, close: e.target.value }))} className="w-28" />
           </Field>
-          <Field label={isGolf ? 'Tee interval (min)' : 'Slot length (min)'}>
-            <Input type="number" min={5} max={1440} value={fill.slotMinutes} onChange={(e) => setFill((f) => ({ ...f, slotMinutes: Math.max(5, Number(e.target.value) || 60) }))} className="w-24" />
+          <Field label={shared ? 'Tee interval (min)' : 'Slot length (min)'}>
+            <Input type="number" min={5} max={1440} value={fill.slotMinutes} onChange={(e) => setFill((f) => ({ ...f, slotMinutes: Number(e.target.value) }))} className="w-24" />
           </Field>
-          <Field label={isGolf ? 'Price / golfer' : 'Price'}>
+          <Field label={shared ? (group.sport === 'golf' ? 'Price / golfer' : 'Price / player') : 'Price'}>
             <Input inputMode="numeric" value={fill.price} onChange={(e) => setFill((f) => ({ ...f, price: e.target.value.replace(/[^0-9]/g, '') }))} className="w-24" />
           </Field>
           <div className="flex gap-1.5">
@@ -262,24 +208,24 @@ export function ScheduleEditor({
       {/* Per-day grid */}
       <div className="card-base p-5">
         <div className="space-y-2">
-          {DAYS.map(({ dow, label }) => {
+          {DAYS.map(({ dow, label: dayLabel }) => {
             const ds = days[dow];
             return (
               <div key={dow} className="flex flex-wrap items-center gap-3">
                 <label className="flex w-24 items-center gap-2 text-sm">
                   <input type="checkbox" checked={ds.enabled} onChange={(e) => patchDay(dow, { enabled: e.target.checked })} />
-                  <span className={ds.enabled ? 'text-ink' : 'text-ink-mute'}>{label}</span>
+                  <span className={ds.enabled ? 'text-ink' : 'text-ink-mute'}>{dayLabel}</span>
                 </label>
                 {ds.enabled ? (
                   <>
                     <Input type="time" step={300} value={ds.open} onChange={(e) => patchDay(dow, { open: e.target.value })} className="h-8 w-28" />
                     <span className="text-ink-mute">→</span>
                     <Input type="time" step={300} value={ds.close} onChange={(e) => patchDay(dow, { close: e.target.value })} className="h-8 w-28" />
-                    <Input type="number" min={5} max={1440} value={ds.slotMinutes} onChange={(e) => patchDay(dow, { slotMinutes: Math.max(5, Number(e.target.value) || 60) })} className="h-8 w-20" title="minutes" />
+                    <Input type="number" min={5} max={1440} value={ds.slotMinutes} onChange={(e) => patchDay(dow, { slotMinutes: Number(e.target.value) })} className="h-8 w-20" title="minutes" />
                     <div className="flex items-center gap-1">
                       <span className="text-ink-mute font-mono">₱</span>
                       <Input inputMode="numeric" value={ds.price} onChange={(e) => patchDay(dow, { price: e.target.value.replace(/[^0-9]/g, '') })} className="h-8 w-24" />
-                      {isGolf && <span className="text-[11px] text-ink-mute">/golfer</span>}
+                      {shared && <span className="text-[11px] text-ink-mute">/{group.sport === 'golf' ? 'golfer' : 'player'}</span>}
                     </div>
                   </>
                 ) : (
@@ -291,16 +237,17 @@ export function ScheduleEditor({
         </div>
 
         <p className="mt-4 text-[11px] text-ink-mute">
-          Applies to all {sportCourts.length} active {SPORT_META[activeSport]?.label ?? activeSport} court
-          {sportCourts.length === 1 ? '' : 's'}. {isGolf ? 'Slot length is the tee-time interval; price is per golfer.' : ''}
+          Applies to {group.courts.map((c) => c.name).join(', ')} ({group.courts.length} active court
+          {group.courts.length === 1 ? '' : 's'}).{' '}
+          {shared ? 'Slot length is the tee time interval; price is per player.' : ''}
         </p>
 
         {error && <p className="mt-3 text-xs text-danger">{error}</p>}
         {savedMsg && <p className="mt-3 text-xs text-brand">{savedMsg}</p>}
 
         <div className="mt-4 flex justify-end">
-          <Button onClick={saveSport} disabled={savingSport}>
-            {savingSport ? 'Saving…' : `Save ${SPORT_META[activeSport]?.label ?? activeSport} hours`}
+          <Button onClick={save} disabled={saving}>
+            {saving ? 'Saving…' : `Save ${label} hours`}
           </Button>
         </div>
       </div>
@@ -312,28 +259,34 @@ export function ScheduleEditor({
           <p className="text-sm font-medium text-ink">Generate bookable slots</p>
         </div>
         <p className="mt-1 text-xs text-ink-dim">
-          Materializes slots from every sport&apos;s saved hours, from today through the chosen date.
-          Skips slots that already exist and any inside a closure — safe to run repeatedly.
+          Materializes slots from every group&apos;s saved hours, from now through the chosen date
+          (venue time). Skips anything that would overlap an existing slot or fall inside a closure,
+          so it is safe to run repeatedly.
         </p>
         <div className="mt-3 flex flex-wrap items-end gap-3">
           <Field label="Through date">
-            <Input type="date" value={through} onChange={(e) => setThrough(e.target.value)} className="w-44" />
+            <Input
+              type="date"
+              min={today}
+              max={maxThrough}
+              value={through}
+              onChange={(e) => setThrough(e.target.value)}
+              className="w-44"
+            />
           </Field>
           <Button onClick={generate} disabled={generating}>
             {generating ? 'Generating…' : 'Generate slots'}
           </Button>
           {genMsg && <Badge tone="brand">{genMsg}</Badge>}
         </div>
+        {genError && <p className="mt-2 text-xs text-danger">{genError}</p>}
         <p className="mt-2 text-[11px] text-ink-mute">
-          Currency: {currency}. Tip: generate a month or two at a time.
+          Currency: {currency}. Up to {GENERATE_MAX_DAYS} days ahead and{' '}
+          {GENERATE_MAX_ROWS.toLocaleString('en-US')} slots per run.
         </p>
       </div>
     </div>
   );
-}
-
-function labelFor(dow: number): string {
-  return DAYS.find((d) => d.dow === dow)?.label ?? String(dow);
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
