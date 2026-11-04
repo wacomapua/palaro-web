@@ -10,7 +10,7 @@
 --   * record_venue_refund_result records either kind; an event slot refund
 --     writes the user's refund row and touches no booking.
 begin;
-select plan(46);
+select plan(52);
 
 -- ---------------------------------------------------------------------------
 -- Table shape.
@@ -75,6 +75,13 @@ select results_eq(
   $$values ('slot', 'succeeded', true, 20000, 400)$$,
   'the pending payment row is recorded as captured, otherwise unchanged');
 select is((select count(*)::int from public.transactions where gateway_ref = 'pi_slot'), 1, 'still one transactions row for the intent');
+-- The payment row names its refund (metadata.event_slot_refund_id), so the
+-- captain's income screens, which cannot read the payer's refunds under RLS,
+-- leave the refunded fee out; its other metadata is kept.
+select is((select metadata->>'event_slot_refund_id' from public.transactions where gateway_ref = 'pi_slot'), :'es_refund'::text,
+  'the payment row is marked with its refund id');
+select is((select metadata->>'event_id' from public.transactions where gateway_ref = 'pi_slot'), :'event'::text,
+  'and keeps its other metadata');
 
 -- The unique (intent, reason) for event slot refunds holds in the table too.
 select throws_ok(format($$insert into public.venue_refunds (kind, amount_cents, reason, paymongo_intent_id, user_id) values ('event_slot', 1, 'late_payment', 'pi_slot', %L)$$, :'player'),
@@ -90,6 +97,31 @@ select results_eq(
   format($$values ('slot', 'succeeded', 'paymongo', %L::uuid, null::uuid, 15000, 0)$$, :'player'),
   'a missing payment row is written as a captured slot payment for the payer');
 select is((select count(*)::int from public.venue_refunds where paymongo_intent_id = 'pi_slot_bare'), 1, 'and the refund is queued');
+select is((select metadata->>'event_slot_refund_id' from public.transactions where gateway_ref = 'pi_slot_bare'), :'es_bare'::text,
+  'the written payment row is marked with its refund id');
+
+-- The webhook marks the payment row too (same key, same id): repeat calls
+-- and an existing marker leave it as it is.
+insert into public.transactions (team_id, user_id, type, amount_cents, gateway, gateway_ref, status, metadata)
+values (:'team', :'player', 'slot', 30000, 'paymongo', 'pi_slot_marked', 'succeeded', '{"slot_id": "s-1"}');
+set local role service_role;
+select public.queue_event_slot_refund('pi_slot_marked', 30000, :'player', 'late_payment') as es_marked \gset
+update public.transactions set metadata = metadata || jsonb_build_object('event_slot_refund_id', :'es_marked'::text)
+ where gateway_ref = 'pi_slot_marked';
+select public.queue_event_slot_refund('pi_slot_marked', 30000, :'player', 'late_payment') \gset
+reset role;
+select is((select metadata from public.transactions where gateway_ref = 'pi_slot_marked'),
+  jsonb_build_object('slot_id', 's-1', 'event_slot_refund_id', :'es_marked'::text),
+  'the marker is written once and agrees with the webhook''s');
+
+-- Refunds for one intent never add up to more than it paid (review finding 1).
+set local role service_role;
+select throws_ok(format($$select public.queue_event_slot_refund('pi_slot', 1, %L, 'player_cancel')$$, :'player'),
+  '22023', null, 'late_payment 20000 plus player_cancel 1 on a 20000 payment is rejected');
+select public.queue_event_slot_refund('pi_slot_split', 12000, :'player', 'player_cancel') \gset
+select throws_ok(format($$select public.queue_event_slot_refund('pi_slot_split', 1, %L, 'late_payment')$$, :'player'),
+  '22023', null, 'a refund above what the intent''s payment row recorded is rejected');
+reset role;
 
 -- A failed payment row (an earlier attempt failed, a later one was captured).
 insert into public.transactions (team_id, user_id, type, amount_cents, gateway, gateway_ref, status)
@@ -165,7 +197,7 @@ select is((select metadata->>'booking_id' from public.transactions where gateway
 -- ---------------------------------------------------------------------------
 set local role authenticated;
 select tests.claims(:'player');
-select is((select count(*)::int from public.venue_refunds where kind = 'event_slot'), 3, 'the payer sees their event slot refunds');
+select is((select count(*)::int from public.venue_refunds where kind = 'event_slot'), 5, 'the payer sees their event slot refunds');
 select tests.claims(:'other');
 select is((select count(*)::int from public.venue_refunds where kind = 'event_slot'), 0, 'another user sees none');
 select tests.claims(:'owner');

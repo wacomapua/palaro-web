@@ -9,7 +9,7 @@
 --      receipts show the payment and then the refund. Never a second row for
 --      an intent: payments-webhook resolves gateway_ref with maybeSingle().
 begin;
-select plan(25);
+select plan(37);
 
 select tests.create_user() as owner \gset
 select tests.create_user() as captain \gset
@@ -107,15 +107,77 @@ select results_eq(
   'receipts: the captain sees the captured payment and its refund');
 reset role;
 
--- An intent that already has its row keeps it.
+-- Paid then cancelled (the intent already has its payment row): a late
+-- payment refund is not this booking's, NULL; the row is not duplicated.
 select tests.create_slot(:'venue', :'court', :'d'::timestamptz + interval '18 hours', :'d'::timestamptz + interval '19 hours', 90000) as s_has \gset
 select tests.create_booking(:'s_has', :'captain', 'cancelled', 1, 90000, 'pi_has') as b_has \gset
 insert into public.transactions (user_id, type, amount_cents, gateway, gateway_ref, status)
 values (:'captain', 'venue_booking', 90000, 'paymongo', 'pi_has', 'succeeded');
 set local role service_role;
-select public.queue_venue_refund(:'b_has', 90000, 'late_payment') \gset
+select coalesce(public.queue_venue_refund(:'b_has', 90000, 'late_payment')::text, 'null') as q_has \gset
 reset role;
-select is((select count(*)::int from public.transactions where gateway_ref = 'pi_has'), 1, 'an existing row for the intent is not duplicated');
+select is(:'q_has'::text, 'null', 'late_payment for a booking whose intent was paid (then cancelled): NULL');
+select is((select count(*)::int from public.venue_refunds where booking_id = :'b_has'), 0, 'nothing queued');
+select is((select count(*)::int from public.transactions where gateway_ref = 'pi_has'), 1, 'and the payment row is not duplicated');
+
+-- ---------------------------------------------------------------------------
+-- Refunds never add up to more than the booking paid (review finding 1).
+-- ---------------------------------------------------------------------------
+-- A paid booking the venue closed: full venue_closure refund queued; a late
+-- payment refund on top is refused (its intent was paid through complete).
+select tests.create_slot(:'venue', :'court', :'d'::timestamptz + interval '26 hours', :'d'::timestamptz + interval '27 hours', 100000, null, 'held') as s_closed \gset
+select tests.create_booking(:'s_closed', :'captain', 'pending_payment', 1, 100000, 'pi_closed') as b_closed \gset
+set local role service_role;
+select * from public.complete_venue_booking('pi_closed') \gset
+reset role;
+set local role authenticated;
+select tests.claims(:'owner');
+select * from public.create_venue_closure(:'venue', :'court', :'d'::timestamptz + interval '26 hours', :'d'::timestamptz + interval '27 hours', 'Flood') \gset
+reset role;
+set local role service_role;
+select coalesce(public.queue_venue_refund(:'b_closed', 100000, 'late_payment')::text, 'null') as q_closed \gset
+reset role;
+select is(:'q_closed'::text, 'null', 'venue_closure then late_payment: the late payment refund is refused (NULL)');
+select results_eq(format('select reason, amount_cents from public.venue_refunds where booking_id = %L', :'b_closed'),
+  $$values ('venue_closure'::text, 100000)$$, 'only the closure refund exists');
+
+-- A captain's 0% cancel of a paid booking: no late payment refund either.
+select tests.create_slot(:'venue', :'court', now() + interval '2 hours', now() + interval '3 hours', 100000, null, 'held') as s_zero \gset
+select tests.create_booking(:'s_zero', :'captain', 'pending_payment', 1, 100000, 'pi_zero') as b_zero \gset
+set local role service_role;
+select * from public.complete_venue_booking('pi_zero') \gset
+reset role;
+set local role authenticated;
+select tests.claims(:'captain');
+select c.refund_amount_cents as zero_refund from public.cancel_venue_booking(:'b_zero', 'changed plans') c \gset
+reset role;
+set local role service_role;
+select coalesce(public.queue_venue_refund(:'b_zero', 100000, 'late_payment')::text, 'null') as q_zero \gset
+reset role;
+select is(:'zero_refund'::int, 0, 'precondition: the cancel inside 24 hours refunded nothing');
+select is(:'q_zero'::text, 'null', 'captain 0% cancel then late_payment: refused (NULL)');
+select is((select count(*)::int from public.venue_refunds where booking_id = :'b_zero'), 0, 'nothing queued');
+
+-- The cap itself: refunds of other reasons count against the total.
+select tests.create_slot(:'venue', :'court', :'d'::timestamptz + interval '28 hours', :'d'::timestamptz + interval '29 hours', 100000) as s_cap \gset
+select tests.create_booking(:'s_cap', :'captain', 'cancelled', 1, 100000, 'pi_cap') as b_cap \gset
+set local role service_role;
+select public.queue_venue_refund(:'b_cap', 100000, 'venue_closure') as cap_closure \gset
+select throws_ok(format('select public.queue_venue_refund(%L, 100000, %L)', :'b_cap', 'late_payment'),
+  '22023', null, 'venue_closure 100000 plus late_payment 100000 on a 100000 booking is rejected');
+select throws_ok(format('select public.queue_venue_refund(%L, 1, %L)', :'b_cap', 'player_cancel'),
+  '22023', null, 'even one more cent is rejected');
+select is(public.queue_venue_refund(:'b_cap', 100000, 'venue_closure'), :'cap_closure'::uuid,
+  'repeating the refund already queued still returns it');
+reset role;
+select tests.create_slot(:'venue', :'court', :'d'::timestamptz + interval '30 hours', :'d'::timestamptz + interval '31 hours', 100000) as s_split \gset
+select tests.create_booking(:'s_split', :'captain', 'cancelled', 1, 100000, 'pi_split') as b_split \gset
+set local role service_role;
+select public.queue_venue_refund(:'b_split', 40000, 'player_cancel') \gset
+select lives_ok(format('select public.queue_venue_refund(%L, 60000, %L)', :'b_split', 'venue_closure'),
+  'refunds that add up to exactly the total are accepted');
+reset role;
+select is((select sum(amount_cents)::int from public.venue_refunds where booking_id = :'b_split'), 100000, 'and total the booking');
 
 -- A shared tee time booking (walk up, no team).
 select tests.create_slot(:'venue', :'course', :'d'::timestamptz + interval '10 hours', :'d'::timestamptz + interval '10 hours 10 minutes', 50000, 4) as s_tee \gset

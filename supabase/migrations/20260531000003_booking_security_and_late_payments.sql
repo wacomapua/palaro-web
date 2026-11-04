@@ -462,7 +462,15 @@ create policy venue_refunds_user_read on public.venue_refunds
 -- gateway_ref with maybeSingle(). reinstate_venue_booking and
 -- complete_venue_booking write nothing for such a booking (it is cancelled
 -- and has a refund), and the booking lock keeps concurrent calls from both
--- writing it. Other reasons are unchanged.
+-- writing it.
+-- Caps (PR #11 review, finding 1): refunds of all reasons for one booking
+-- never add up to more than its total (invalid_parameter_value), and a
+-- late_payment refund is also NULL when the intent already has its
+-- venue_booking payment row and no late_payment refund exists yet: the
+-- booking was paid through complete_venue_booking or reinstate_venue_booking
+-- (and maybe cancelled since, by a closure or the captain), so the payment
+-- is not late and any refund it is owed is queued or decided elsewhere.
+-- A repeat of a refund already queued returns it as before.
 create or replace function public.queue_venue_refund(
   _booking_id uuid,
   _amount_cents int,
@@ -479,9 +487,12 @@ declare
   _id uuid;
 begin
   -- Bad input is an error whatever the booking's state (the table's own
-  -- check, raised before the late payment short cut below).
+  -- checks, raised before the late payment short cut and the cap below).
   if _amount_cents is null or _amount_cents <= 0 then
     raise exception 'Refund amount must be positive' using errcode = 'check_violation';
+  end if;
+  if _reason is null or _reason not in ('venue_closure', 'late_payment', 'player_cancel') then
+    raise exception 'Unknown refund reason %', _reason using errcode = 'check_violation';
   end if;
 
   select b.* into _b from public.venue_bookings b where b.id = _booking_id for update;
@@ -493,18 +504,43 @@ begin
       using errcode = 'invalid_parameter_value';
   end if;
 
-  if _reason = 'late_payment' and _b.status in ('paid', 'completed') then
-    return null;
+  if _reason = 'late_payment' then
+    if _b.status in ('paid', 'completed') then
+      return null;
+    end if;
+    if _b.paymongo_intent_id is not null
+       and not exists (
+         select 1 from public.venue_refunds r
+          where r.booking_id = _b.id and r.reason = 'late_payment'
+       )
+       and exists (
+         select 1 from public.transactions t
+          where t.type = 'venue_booking' and t.gateway_ref = _b.paymongo_intent_id
+       ) then
+      return null;
+    end if;
   end if;
 
-  insert into public.venue_refunds (booking_id, amount_cents, reason)
-  values (_booking_id, _amount_cents, _reason)
-  on conflict (booking_id, reason) do nothing
-  returning id into _id;
+  select r.id into _id from public.venue_refunds r
+   where r.booking_id = _booking_id and r.reason = _reason;
 
   if _id is null then
-    select r.id into _id from public.venue_refunds r
-     where r.booking_id = _booking_id and r.reason = _reason;
+    if _amount_cents + coalesce((
+         select sum(r.amount_cents) from public.venue_refunds r where r.booking_id = _booking_id
+       ), 0) > _b.total_cents then
+      raise exception 'Refunds for booking % would add up to more than the % it paid', _booking_id, _b.total_cents
+        using errcode = 'invalid_parameter_value';
+    end if;
+
+    insert into public.venue_refunds (booking_id, amount_cents, reason)
+    values (_booking_id, _amount_cents, _reason)
+    on conflict (booking_id, reason) do nothing
+    returning id into _id;
+
+    if _id is null then
+      select r.id into _id from public.venue_refunds r
+       where r.booking_id = _booking_id and r.reason = _reason;
+    end if;
   end if;
 
   if _reason = 'late_payment'
@@ -549,9 +585,16 @@ grant execute on function public.queue_venue_refund(uuid, int, text) to service_
 -- marked 'succeeded': the money was captured. If the intent has no row at
 -- all, one is written for the payer with what is known (amount, no team,
 -- no fee). Never a second row for an intent. An intent whose row is not an
--- event slot payment, or was paid by someone else, or a refund above the
--- payment, is rejected (invalid_parameter_value). Calls for one intent run
--- one at a time (advisory lock on the intent).
+-- event slot payment, or was paid by someone else, or refunds of all
+-- reasons for the intent adding up to more than its payment, are rejected
+-- (invalid_parameter_value). Calls for one intent run one at a time
+-- (advisory lock on the intent; without it two calls for an intent with no
+-- row would each write one).
+-- The payment row is also marked with its refund:
+-- metadata.event_slot_refund_id = the refund id. The captain's income
+-- screens leave marked slot payments out, and under RLS they cannot read
+-- the payer's refund rows to find out otherwise. payments-webhook writes the
+-- same key with the same id; an existing marker is kept as it is.
 create or replace function public.queue_event_slot_refund(
   _intent_id text,
   _amount_cents int,
@@ -597,14 +640,27 @@ begin
     end if;
   end if;
 
-  insert into public.venue_refunds (kind, paymongo_intent_id, user_id, amount_cents, reason)
-  values ('event_slot', _intent_id, _user_id, _amount_cents, _reason)
-  on conflict (paymongo_intent_id, reason) where kind = 'event_slot' do nothing
-  returning id into _id;
+  select r.id into _id from public.venue_refunds r
+   where r.kind = 'event_slot' and r.paymongo_intent_id = _intent_id and r.reason = _reason;
 
   if _id is null then
-    select r.id into _id from public.venue_refunds r
-     where r.kind = 'event_slot' and r.paymongo_intent_id = _intent_id and r.reason = _reason;
+    if _amount_cents + coalesce((
+         select sum(r.amount_cents) from public.venue_refunds r
+          where r.kind = 'event_slot' and r.paymongo_intent_id = _intent_id
+       ), 0) > (case when _has_pay then _pay.amount_cents else _amount_cents end) then
+      raise exception 'Refunds for intent % would add up to more than it paid', _intent_id
+        using errcode = 'invalid_parameter_value';
+    end if;
+
+    insert into public.venue_refunds (kind, paymongo_intent_id, user_id, amount_cents, reason)
+    values ('event_slot', _intent_id, _user_id, _amount_cents, _reason)
+    on conflict (paymongo_intent_id, reason) where kind = 'event_slot' do nothing
+    returning id into _id;
+
+    if _id is null then
+      select r.id into _id from public.venue_refunds r
+       where r.kind = 'event_slot' and r.paymongo_intent_id = _intent_id and r.reason = _reason;
+    end if;
   end if;
 
   if not _has_pay then
@@ -614,10 +670,17 @@ begin
     ) values (
       null, _user_id, 'slot', _amount_cents, 0,
       'paymongo', _intent_id, 'succeeded',
-      jsonb_build_object('recorded_by', 'queue_event_slot_refund')
+      jsonb_build_object('recorded_by', 'queue_event_slot_refund', 'event_slot_refund_id', _id)
     );
-  elsif _pay.status in ('pending', 'failed') then
-    update public.transactions set status = 'succeeded' where id = _pay.id;
+  else
+    update public.transactions t
+       set status = case when t.status in ('pending', 'failed') then 'succeeded'::public.txn_status else t.status end,
+           metadata = case
+             when jsonb_typeof(t.metadata) = 'object' and t.metadata ? 'event_slot_refund_id' then t.metadata
+             else (case when jsonb_typeof(t.metadata) = 'object' then t.metadata else '{}'::jsonb end)
+                  || jsonb_build_object('event_slot_refund_id', _id)
+           end
+     where t.id = _pay.id;
   end if;
 
   return _id;
