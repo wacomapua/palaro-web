@@ -10,13 +10,15 @@
 --   3. reinstate_venue_booking(text) (C4, C11 note): a payment that lands on
 --      a booking cancelled before it was paid puts the booking back when the
 --      slot still has room, or returns NULL so payments-webhook refunds it.
---   4. record_venue_refund_result (C10): payments-process-refunds records
+--   4. queue_venue_refund (C12 a, b): a late_payment refund is never queued
+--      for a booking that stands, and records the captured payment.
+--   5. record_venue_refund_result (C10): payments-process-refunds records
 --      each PayMongo refund outcome; a success lands on the booking and in
 --      transactions.
---   5. book_venue_slot (C3, P4 part): service_role only. It was executable by
+--   6. book_venue_slot (C3, P4 part): service_role only. It was executable by
 --      PUBLIC, so anyone with the anon key could hold any slot in any
 --      player's name without paying.
---   6. pg_cron: installed here and both release jobs (re)scheduled by name.
+--   7. pg_cron: installed here and both release jobs (re)scheduled by name.
 
 -- =============================================================================
 -- 1. venue_slots_remaining (C5)
@@ -394,7 +396,102 @@ revoke execute on function public.reinstate_venue_booking(text) from public, ano
 grant execute on function public.reinstate_venue_booking(text) to service_role;
 
 -- =============================================================================
--- 4. record_venue_refund_result (C10)
+-- 4. queue_venue_refund: late payments (C12 a, b)
+-- =============================================================================
+-- Redefined from 20260531000001 (C1); idempotent on (booking_id, reason) and
+-- capped at the booking total as before. Two deliveries of one late "paid"
+-- event can run at once: one reinstates the booking while the other, having
+-- seen it cancelled, queues a late_payment refund. Both now take the booking
+-- row lock first (reinstate_venue_booking already did), and a late_payment
+-- refund for a booking that stands ('paid' or 'completed') returns NULL and
+-- queues nothing; payments-webhook reads NULL as "paid, nothing to refund".
+-- The reverse order was already safe: reinstate refuses a booking with a
+-- refund queued.
+-- C12 b: a late payment was captured but never completed, so the intent has
+-- no transactions row. Queueing its refund also records the payment as the
+-- intent's venue_booking row, exactly as complete_venue_booking writes it,
+-- so receipts show the payment and then the refund. Only when the intent has
+-- no row at all: one row per intent, because payments-webhook resolves
+-- gateway_ref with maybeSingle(). reinstate_venue_booking and
+-- complete_venue_booking write nothing for such a booking (it is cancelled
+-- and has a refund), and the booking lock keeps concurrent calls from both
+-- writing it. Other reasons are unchanged.
+create or replace function public.queue_venue_refund(
+  _booking_id uuid,
+  _amount_cents int,
+  _reason text
+) returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  _b public.venue_bookings;
+  _slot public.venue_slots;
+  _venue public.venues;
+  _id uuid;
+begin
+  -- Bad input is an error whatever the booking's state (the table's own
+  -- check, raised before the late payment short cut below).
+  if _amount_cents is null or _amount_cents <= 0 then
+    raise exception 'Refund amount must be positive' using errcode = 'check_violation';
+  end if;
+
+  select b.* into _b from public.venue_bookings b where b.id = _booking_id for update;
+  if not found then
+    raise exception 'Booking % not found', _booking_id using errcode = 'no_data_found';
+  end if;
+  if _amount_cents > _b.total_cents then
+    raise exception 'Refund of % exceeds the % paid for booking %', _amount_cents, _b.total_cents, _booking_id
+      using errcode = 'invalid_parameter_value';
+  end if;
+
+  if _reason = 'late_payment' and _b.status in ('paid', 'completed') then
+    return null;
+  end if;
+
+  insert into public.venue_refunds (booking_id, amount_cents, reason)
+  values (_booking_id, _amount_cents, _reason)
+  on conflict (booking_id, reason) do nothing
+  returning id into _id;
+
+  if _id is null then
+    select r.id into _id from public.venue_refunds r
+     where r.booking_id = _booking_id and r.reason = _reason;
+  end if;
+
+  if _reason = 'late_payment'
+     and _b.paymongo_intent_id is not null
+     and not exists (select 1 from public.transactions t where t.gateway_ref = _b.paymongo_intent_id) then
+    select s.* into _slot from public.venue_slots s where s.id = _b.slot_id;
+    select v.* into _venue from public.venues v where v.id = _b.venue_id;
+
+    insert into public.transactions (
+      team_id, user_id, type, amount_cents, currency,
+      platform_fee_cents, gateway, gateway_ref, status, metadata
+    ) values (
+      _b.team_id, _b.captain_user_id, 'venue_booking',
+      _b.total_cents, _venue.currency,
+      _b.platform_fee_cents, 'paymongo', _b.paymongo_intent_id, 'succeeded',
+      jsonb_build_object(
+        'booking_id', _b.id,
+        'slot_id', _slot.id,
+        'venue_id', _venue.id,
+        'court_id', _slot.court_id,
+        'party_size', _b.party_size
+      )
+    );
+  end if;
+
+  return _id;
+end;
+$$;
+
+revoke execute on function public.queue_venue_refund(uuid, int, text) from public, anon, authenticated;
+grant execute on function public.queue_venue_refund(uuid, int, text) to service_role;
+
+-- =============================================================================
+-- 5. record_venue_refund_result (C10)
 -- =============================================================================
 -- venue_bookings.refund_amount_cents and refunded_at exist since 0005, and
 -- txn_type 'venue_refund' since 0004; the column statements are no ops kept
@@ -510,7 +607,7 @@ revoke execute on function public.record_venue_refund_result(uuid, boolean, text
 grant execute on function public.record_venue_refund_result(uuid, boolean, text, text) to service_role;
 
 -- =============================================================================
--- 5. book_venue_slot: service_role only (C3, P4 part)
+-- 6. book_venue_slot: service_role only (C3, P4 part)
 -- =============================================================================
 -- 20260529000002 created it with plain CREATE FUNCTION, so PUBLIC (and the
 -- anon and authenticated defaults) could execute it. Its only caller is
@@ -520,7 +617,7 @@ revoke execute on function public.book_venue_slot(uuid, uuid, uuid, int, int, nu
 grant execute on function public.book_venue_slot(uuid, uuid, uuid, int, int, numeric) to service_role;
 
 -- =============================================================================
--- 6. Release jobs (team-manager PR #7 review, finding 8)
+-- 7. Release jobs (team-manager PR #7 review, finding 8)
 -- =============================================================================
 -- 0005 (release-stale-venue-holds) and 20260529000004
 -- (release-stale-shared-bookings) only scheduled their jobs when pg_cron was
