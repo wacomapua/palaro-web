@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
 import { DEFAULT_REFUND_POLICY } from '@/lib/refund';
 import type { RefundPolicy } from '@/lib/types/db';
 import { RefundPolicyForm } from './refund-policy-form';
@@ -11,13 +12,16 @@ export default async function RefundPolicyPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const { data: venue } = await supabase
-    .from('venues')
-    .select('id, default_refund_policy')
-    .eq('owner_id', user.id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const venue = dataOrThrow(
+    await supabase
+      .from('venues')
+      .select('id, default_refund_policy')
+      .eq('owner_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    'venue',
+  );
   if (!venue) redirect('/onboarding/profile');
 
   const policy = (venue.default_refund_policy as RefundPolicy | null) ?? DEFAULT_REFUND_POLICY;

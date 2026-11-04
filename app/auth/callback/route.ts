@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { EmailOtpType } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
 import { publicOrigin } from '@/lib/public-origin';
 
 // Handles BOTH Supabase auth-link styles:
@@ -40,11 +41,14 @@ export async function GET(request: Request) {
     data: { user },
   } = await supabase.auth.getUser();
   if (user) {
-    const { data: venues } = await supabase
-      .from('venues')
-      .select('id')
-      .eq('owner_id', user.id)
-      .limit(1);
+    const venues = dataOrThrow(
+      await supabase
+        .from('venues')
+        .select('id')
+        .eq('owner_id', user.id)
+        .limit(1),
+      'venues',
+    );
     if (!venues || venues.length === 0) {
       return NextResponse.redirect(`${origin}/onboarding/profile`);
     }
