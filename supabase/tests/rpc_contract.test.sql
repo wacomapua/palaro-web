@@ -10,8 +10,11 @@
 --   reinstate_venue_booking     payments-webhook/index.ts:280
 --   queue_venue_refund          payments-webhook/index.ts:287
 --   record_venue_refund_result  payments-process-refunds/index.ts:165
+--   queue_event_slot_refund     payments-webhook (C12 d, being written against this signature)
+-- payments-process-refunds also reads venue_refunds directly (listCandidates,
+-- claim): the columns it selects and the booking embed must keep working.
 begin;
-select plan(64);
+select plan(76);
 
 create temp table rpc_contract (fn text, args text, result text, client boolean) on commit drop;
 insert into rpc_contract values
@@ -24,7 +27,8 @@ insert into rpc_contract values
   ('release_held_booking_admin', '_booking_id uuid, _reason text', 'void', false),
   ('reinstate_venue_booking', '_intent_id text', 'venue_bookings', false),
   ('queue_venue_refund', '_booking_id uuid, _amount_cents integer, _reason text', 'uuid', false),
-  ('record_venue_refund_result', '_refund_id uuid, _succeeded boolean, _paymongo_refund_id text, _error text', 'void', false);
+  ('record_venue_refund_result', '_refund_id uuid, _succeeded boolean, _paymongo_refund_id text, _error text', 'void', false),
+  ('queue_event_slot_refund', '_intent_id text, _amount_cents integer, _user_id uuid, _reason text', 'uuid', false);
 
 create temp view rpc_found as
   select c.*, (select p.oid from pg_proc p
@@ -71,6 +75,8 @@ select throws_ok($$select * from public.reinstate_venue_booking('pi_x')$$,
   '42501', null, 'anon calling reinstate_venue_booking is refused');
 select throws_ok($$select public.record_venue_refund_result(gen_random_uuid(), true, 'ref_x', null)$$,
   '42501', null, 'anon calling record_venue_refund_result is refused');
+select throws_ok($$select public.queue_event_slot_refund('pi_x', 1, gen_random_uuid(), 'late_payment')$$,
+  '42501', null, 'anon calling queue_event_slot_refund is refused');
 reset role;
 
 set local role authenticated;
@@ -83,7 +89,18 @@ select throws_ok($$select * from public.reinstate_venue_booking('pi_x')$$,
   '42501', null, 'authenticated calling reinstate_venue_booking is refused');
 select throws_ok($$select public.record_venue_refund_result(gen_random_uuid(), true, 'ref_x', null)$$,
   '42501', null, 'authenticated calling record_venue_refund_result is refused');
+select throws_ok($$select public.queue_event_slot_refund('pi_x', 1, gen_random_uuid(), 'late_payment')$$,
+  '42501', null, 'authenticated calling queue_event_slot_refund is refused');
 reset role;
+
+-- venue_refunds as payments-process-refunds reads it (listCandidates select,
+-- including the booking embed, which needs the booking_id foreign key).
+select fk_ok('public', 'venue_refunds', 'booking_id', 'public', 'venue_bookings', 'id',
+  'venue_refunds.booking_id references venue_bookings, so the booking embed resolves');
+select lives_ok($$select r.id, r.kind, r.booking_id, r.paymongo_intent_id, r.user_id, r.amount_cents, r.reason,
+                         r.status, r.attempts, r.updated_at, r.last_error, b.paymongo_intent_id
+                    from public.venue_refunds r left join public.venue_bookings b on b.id = r.booking_id limit 0$$,
+  'every venue_refunds column the processor reads exists, event slot columns included');
 
 select * from finish();
 rollback;

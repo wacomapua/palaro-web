@@ -10,11 +10,13 @@
 --   3. reinstate_venue_booking(text) (C4, C11 note): a payment that lands on
 --      a booking cancelled before it was paid puts the booking back when the
 --      slot still has room, or returns NULL so payments-webhook refunds it.
---   4. queue_venue_refund (C12 a, b): a late_payment refund is never queued
---      for a booking that stands, and records the captured payment.
---   5. record_venue_refund_result (C10): payments-process-refunds records
---      each PayMongo refund outcome; a success lands on the booking and in
---      transactions.
+--   4. Refund queue (C12): queue_venue_refund never queues a late_payment
+--      refund for a booking that stands and records the captured payment
+--      (a, b); venue_refunds also holds event slot refunds, queued by
+--      queue_event_slot_refund (c).
+--   5. record_venue_refund_result (C10, C12 c): payments-process-refunds
+--      records each PayMongo refund outcome of either kind; a success lands
+--      on the booking (venue bookings) and in transactions.
 --   6. book_venue_slot (C3, P4 part): service_role only. It was executable by
 --      PUBLIC, so anyone with the anon key could hold any slot in any
 --      player's name without paying.
@@ -396,8 +398,45 @@ revoke execute on function public.reinstate_venue_booking(text) from public, ano
 grant execute on function public.reinstate_venue_booking(text) to service_role;
 
 -- =============================================================================
--- 4. queue_venue_refund: late payments (C12 a, b)
+-- 4. Refund queue: late payments and event slots (C12)
 -- =============================================================================
+-- 4a. Event slot refunds (C12 c). A slot fee captured after the payer's
+-- event_slots row was released, deleted or taken over goes back through the
+-- same queue and processor. An event_slot row has no booking; it carries the
+-- PayMongo intent (payments-process-refunds reads it from the row) and the
+-- paying user (who may read it). One per (intent, reason). An event slot is
+-- never refunded for a venue closure.
+alter table public.venue_refunds add column if not exists kind text not null default 'venue_booking';
+alter table public.venue_refunds add column if not exists paymongo_intent_id text;
+alter table public.venue_refunds add column if not exists user_id uuid references public.profiles(id) on delete restrict;
+alter table public.venue_refunds alter column booking_id drop not null;
+
+alter table public.venue_refunds drop constraint if exists venue_refunds_kind_check;
+alter table public.venue_refunds
+  add constraint venue_refunds_kind_check check (kind in ('venue_booking', 'event_slot'));
+
+alter table public.venue_refunds drop constraint if exists venue_refunds_kind_refs_check;
+alter table public.venue_refunds
+  add constraint venue_refunds_kind_refs_check check (
+    (kind = 'venue_booking' and booking_id is not null)
+    or (kind = 'event_slot'
+        and booking_id is null
+        and paymongo_intent_id is not null
+        and user_id is not null
+        and reason in ('late_payment', 'player_cancel'))
+  );
+
+create unique index if not exists venue_refunds_event_slot_intent_reason_key
+  on public.venue_refunds (paymongo_intent_id, reason)
+  where kind = 'event_slot';
+
+drop policy if exists venue_refunds_user_read on public.venue_refunds;
+create policy venue_refunds_user_read on public.venue_refunds
+  for select to authenticated using (
+    kind = 'event_slot' and user_id = (select auth.uid())
+  );
+
+-- 4b. queue_venue_refund: late payments (C12 a, b).
 -- Redefined from 20260531000001 (C1); idempotent on (booking_id, reason) and
 -- capped at the booking total as before. Two deliveries of one late "paid"
 -- event can run at once: one reinstates the booking while the other, having
@@ -490,8 +529,98 @@ $$;
 revoke execute on function public.queue_venue_refund(uuid, int, text) from public, anon, authenticated;
 grant execute on function public.queue_venue_refund(uuid, int, text) to service_role;
 
+-- 4c. queue_event_slot_refund (C12 c). payments-webhook calls it for a paid
+-- event slot intent whose event_slots row is missing, released or no longer
+-- the payer's. It records the captured payment as the app's event slot
+-- payment row, then queues the refund; returns the refund id, idempotent on
+-- (intent, reason).
+-- The payment row is the one payments-create-intent writes for the intent
+-- (transactions type 'slot', team_id the event's team, gateway 'paymongo',
+-- gateway_ref the intent id, status 'pending' until payments-webhook settles
+-- it). If it is still 'pending', or 'failed' from an earlier attempt, it is
+-- marked 'succeeded': the money was captured. If the intent has no row at
+-- all, one is written for the payer with what is known (amount, no team,
+-- no fee). Never a second row for an intent. An intent whose row is not an
+-- event slot payment, or was paid by someone else, or a refund above the
+-- payment, is rejected (invalid_parameter_value). Calls for one intent run
+-- one at a time (advisory lock on the intent).
+create or replace function public.queue_event_slot_refund(
+  _intent_id text,
+  _amount_cents int,
+  _user_id uuid,
+  _reason text
+) returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  _pay public.transactions;
+  _has_pay boolean;
+  _id uuid;
+begin
+  if _intent_id is null or btrim(_intent_id) = '' then
+    raise exception 'A PayMongo intent id is required' using errcode = 'invalid_parameter_value';
+  end if;
+  if _user_id is null then
+    raise exception 'The paying user is required' using errcode = 'invalid_parameter_value';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended('payment_intent:' || _intent_id, 0));
+
+  select t.* into _pay
+    from public.transactions t
+   where t.gateway_ref = _intent_id
+   order by t.created_at, t.id
+   limit 1
+     for update;
+  _has_pay := found;
+
+  if _has_pay then
+    if _pay.type <> 'slot' then
+      raise exception 'Intent % did not pay for an event slot', _intent_id using errcode = 'invalid_parameter_value';
+    end if;
+    if _pay.user_id <> _user_id then
+      raise exception 'Intent % was paid by another user', _intent_id using errcode = 'invalid_parameter_value';
+    end if;
+    if _amount_cents > _pay.amount_cents then
+      raise exception 'Refund of % exceeds the % paid on intent %', _amount_cents, _pay.amount_cents, _intent_id
+        using errcode = 'invalid_parameter_value';
+    end if;
+  end if;
+
+  insert into public.venue_refunds (kind, paymongo_intent_id, user_id, amount_cents, reason)
+  values ('event_slot', _intent_id, _user_id, _amount_cents, _reason)
+  on conflict (paymongo_intent_id, reason) where kind = 'event_slot' do nothing
+  returning id into _id;
+
+  if _id is null then
+    select r.id into _id from public.venue_refunds r
+     where r.kind = 'event_slot' and r.paymongo_intent_id = _intent_id and r.reason = _reason;
+  end if;
+
+  if not _has_pay then
+    insert into public.transactions (
+      team_id, user_id, type, amount_cents, platform_fee_cents,
+      gateway, gateway_ref, status, metadata
+    ) values (
+      null, _user_id, 'slot', _amount_cents, 0,
+      'paymongo', _intent_id, 'succeeded',
+      jsonb_build_object('recorded_by', 'queue_event_slot_refund')
+    );
+  elsif _pay.status in ('pending', 'failed') then
+    update public.transactions set status = 'succeeded' where id = _pay.id;
+  end if;
+
+  return _id;
+end;
+$$;
+
+revoke execute on function public.queue_event_slot_refund(text, int, uuid, text) from public, anon, authenticated;
+grant execute on function public.queue_event_slot_refund(text, int, uuid, text) to service_role;
+
 -- =============================================================================
--- 5. record_venue_refund_result (C10)
+-- 5. record_venue_refund_result (C10, C12 c)
 -- =============================================================================
 -- venue_bookings.refund_amount_cents and refunded_at exist since 0005, and
 -- txn_type 'venue_refund' since 0004; the column statements are no ops kept
@@ -517,6 +646,11 @@ alter table public.venue_bookings add column if not exists refunded_at timestamp
 -- tagged refund would be counted as money in. Venue payouts (palaro-web
 -- payouts page) read venue_bookings, where refunded bookings are already
 -- cancelled or refunded and so out of the next payout.
+-- An event slot refund (C12 c) touches no booking: its row is written for
+-- the paying user with team_id null and type 'venue_refund' too (receipts
+-- label it "Refund"; no new txn_type for team-manager to learn), currency
+-- from the intent's payment row, and metadata with the refund, kind, reason,
+-- intent and the payment's event and slot.
 -- A repeat success is a no op, and a failure never downgrades a success.
 -- Failure: 'failed' with last_error; attempts belong to the claim.
 -- Lock order: booking row, then refund row (as apply_venue_closure, which
@@ -532,10 +666,10 @@ security definer
 set search_path = public
 as $$
 declare
-  _booking_id uuid;
   _b public.venue_bookings;
   _r public.venue_refunds;
   _slot public.venue_slots;
+  _pay public.transactions;
   _currency text;
 begin
   if _succeeded is null then
@@ -545,12 +679,14 @@ begin
     raise exception 'A successful refund needs its PayMongo refund id' using errcode = 'invalid_parameter_value';
   end if;
 
-  select r.booking_id into _booking_id from public.venue_refunds r where r.id = _refund_id;
-  if _booking_id is null then
+  select r.* into _r from public.venue_refunds r where r.id = _refund_id;
+  if not found then
     raise exception 'Refund % not found', _refund_id using errcode = 'no_data_found';
   end if;
 
-  select b.* into _b from public.venue_bookings b where b.id = _booking_id for update;
+  if _r.kind = 'venue_booking' then
+    select b.* into _b from public.venue_bookings b where b.id = _r.booking_id for update;
+  end if;
   select r.* into _r from public.venue_refunds r where r.id = _refund_id for update;
 
   if _r.status = 'succeeded' then
@@ -570,6 +706,31 @@ begin
          paymongo_refund_id = btrim(_paymongo_refund_id),
          last_error = null
    where id = _r.id;
+
+  if _r.kind = 'event_slot' then
+    select t.* into _pay
+      from public.transactions t
+     where t.gateway_ref = _r.paymongo_intent_id and t.type = 'slot'
+     order by t.created_at, t.id
+     limit 1;
+
+    insert into public.transactions (
+      team_id, user_id, type, amount_cents, currency,
+      platform_fee_cents, gateway, gateway_ref, status, metadata
+    ) values (
+      null, _r.user_id, 'venue_refund', _r.amount_cents, coalesce(_pay.currency, 'PHP'),
+      0, 'paymongo', btrim(_paymongo_refund_id), 'succeeded',
+      jsonb_strip_nulls(jsonb_build_object(
+        'refund_id', _r.id,
+        'kind', 'event_slot',
+        'reason', _r.reason,
+        'intent_id', _r.paymongo_intent_id,
+        'event_id', _pay.metadata -> 'event_id',
+        'slot_id', _pay.metadata -> 'slot_id'
+      ))
+    );
+    return;
+  end if;
 
   update public.venue_bookings b
      set refund_amount_cents = (
