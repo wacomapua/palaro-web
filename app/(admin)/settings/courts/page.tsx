@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
 import { CourtsManager } from './courts-manager';
 
 export default async function CourtsSettings() {
@@ -9,13 +10,16 @@ export default async function CourtsSettings() {
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const { data: venue } = await supabase
-    .from('venues')
-    .select('id, sport')
-    .eq('owner_id', user.id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const venue = dataOrThrow(
+    await supabase
+      .from('venues')
+      .select('id, sport')
+      .eq('owner_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    'venue',
+  );
   if (!venue) redirect('/onboarding/profile');
 
   const { data: offered } = await supabase
@@ -30,9 +34,11 @@ export default async function CourtsSettings() {
 
   const { data: courts } = await supabase
     .from('venue_courts')
-    .select('id, venue_id, parent_court_id, sport, name, kind, capacity, active, sort_order')
+    .select('id, venue_id, parent_court_id, sport, name, kind, capacity, active, sort_order, created_at')
     .eq('venue_id', venue.id)
-    .order('sort_order');
+    .order('sort_order')
+    .order('created_at')
+    .order('id');
 
   const maxSortOrder = (courts ?? []).reduce((m, c) => Math.max(m, c.sort_order), -1);
 
@@ -41,7 +47,7 @@ export default async function CourtsSettings() {
       <h1 className="text-3xl font-medium tracking-tight">Courts</h1>
       <p className="mt-1 text-sm text-ink-dim">
         Every bookable court, field, course, or lane. Add a new layout (e.g. another course or a
-        driving range), rename in the calendar, or deactivate what&apos;s out of service.
+        driving range), rename, reorder, or deactivate what&apos;s out of service.
       </p>
 
       <div className="mt-8">

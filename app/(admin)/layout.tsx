@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { CalendarDays, Home, ListTree, Receipt, Settings, Wallet } from 'lucide-react';
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
 import { Button } from '@/components/ui/button';
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
@@ -11,10 +12,13 @@ export default async function AdminLayout({ children }: { children: React.ReactN
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const { data: venues } = await supabase
-    .from('venues')
-    .select('id, name, status')
-    .eq('owner_id', user.id);
+  const venues = dataOrThrow(
+    await supabase
+      .from('venues')
+      .select('id, name, status')
+      .eq('owner_id', user.id),
+    'venues',
+  );
   const venue = venues?.[0];
 
   if (!venue) redirect('/onboarding/profile');

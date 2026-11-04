@@ -1,13 +1,15 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { ChevronRight, Plus, Power, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, ChevronRight, Pencil, Plus, Power, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 import { createClient } from '@/lib/supabase/client';
 import { CourtLayoutBuilder } from '@/components/court-layout-builder';
 import { SPORT_CONFIGS } from '@/lib/sport-presets';
+import { compareCourtOrder, moveTarget } from '@/lib/courts';
 import type { VenueSport } from '@/lib/types/db';
 
 interface Court {
@@ -20,6 +22,7 @@ interface Court {
   capacity: number | null;
   active: boolean;
   sort_order: number;
+  created_at: string;
 }
 
 interface CourtTreeNode extends Court {
@@ -43,6 +46,16 @@ export function CourtsManager({
   const [adding, setAdding] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Every move button is disabled while a reorder is saving or any refresh is
+  // still loading: until the new order arrives, the list on screen is stale.
+  const [reordering, setReordering] = useState(false);
+  const [refreshing, startRefresh] = useTransition();
+  const reorderInFlight = useRef(false);
+  const moveLocked = reordering || refreshing;
+
+  function refresh() {
+    startRefresh(() => router.refresh());
+  }
 
   // Group courts into trees, bucketed by sport (roots carry the sport).
   const bySport = useMemo(() => {
@@ -56,8 +69,9 @@ export function CourtsManager({
         roots.push(n);
       }
     });
+    byId.forEach((n) => n.children.sort(compareCourtOrder));
     const map = new Map<VenueSport, CourtTreeNode[]>();
-    for (const r of roots.sort((a, b) => a.sort_order - b.sort_order)) {
+    for (const r of roots.sort(compareCourtOrder)) {
       const arr = map.get(r.sport) ?? [];
       arr.push(r);
       map.set(r.sport, arr);
@@ -87,7 +101,50 @@ export function CourtsManager({
       setError(e.message);
       return;
     }
-    router.refresh();
+    refresh();
+  }
+
+  async function rename(court: Court, name: string) {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === court.name) return;
+    setBusyId(court.id);
+    setError(null);
+    const supabase = createClient();
+    const { error: e } = await supabase
+      .from('venue_courts')
+      .update({ name: trimmed })
+      .eq('id', court.id);
+    setBusyId(null);
+    if (e) {
+      setError(e.message);
+      return;
+    }
+    refresh();
+  }
+
+  // Move a court one place up or down among its siblings (same parent, same
+  // sport). sort_order is one sequence across the whole venue, so the RPC
+  // swaps the two courts' values in one transaction and nothing else moves.
+  async function move(court: Court, dir: -1 | 1) {
+    if (reorderInFlight.current || moveLocked) return;
+    const otherId = moveTarget(courts, court.id, dir);
+    if (!otherId) return;
+
+    reorderInFlight.current = true;
+    setReordering(true);
+    setError(null);
+    const supabase = createClient();
+    const { error: e } = await supabase.rpc('swap_venue_court_sort_order', {
+      _court_id: court.id,
+      _other_court_id: otherId,
+    });
+    reorderInFlight.current = false;
+    setReordering(false);
+    if (e) {
+      setError(e.message);
+      return;
+    }
+    refresh();
   }
 
   async function remove(court: CourtTreeNode) {
@@ -108,7 +165,7 @@ export function CourtsManager({
       );
       return;
     }
-    router.refresh();
+    refresh();
   }
 
   return (
@@ -127,14 +184,19 @@ export function CourtsManager({
                     {cfg?.label ?? sport}
                   </div>
                   <ul className="space-y-1">
-                    {(bySport.get(sport) ?? []).map((root) => (
+                    {(bySport.get(sport) ?? []).map((root, i, arr) => (
                       <CourtRow
                         key={root.id}
                         node={root}
                         depth={0}
+                        index={i}
+                        siblingCount={arr.length}
                         busyId={busyId}
+                        moveLocked={moveLocked}
                         onToggle={toggleActive}
                         onRemove={remove}
+                        onRename={rename}
+                        onMove={move}
                       />
                     ))}
                   </ul>
@@ -162,7 +224,7 @@ export function CourtsManager({
             submitLabel="Add courts"
             onCommitted={() => {
               setAdding(false);
-              router.refresh();
+              refresh();
             }}
           />
         </div>
@@ -179,16 +241,39 @@ export function CourtsManager({
 function CourtRow({
   node,
   depth,
+  index,
+  siblingCount,
   busyId,
+  moveLocked,
   onToggle,
   onRemove,
+  onRename,
+  onMove,
 }: {
   node: CourtTreeNode;
   depth: number;
+  index: number;
+  siblingCount: number;
   busyId: string | null;
+  moveLocked: boolean;
   onToggle: (c: Court) => void;
   onRemove: (c: CourtTreeNode) => void;
+  onRename: (c: Court, name: string) => void;
+  onMove: (c: Court, dir: -1 | 1) => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(node.name);
+  const busy = busyId === node.id;
+
+  function commit() {
+    setEditing(false);
+    onRename(node, draft);
+  }
+  function cancel() {
+    setEditing(false);
+    setDraft(node.name);
+  }
+
   return (
     <>
       <li
@@ -196,47 +281,108 @@ function CourtRow({
         style={{ paddingLeft: 4 + depth * 18 }}
       >
         {depth > 0 && <ChevronRight className="h-3 w-3 text-ink-mute" />}
-        <span className={`flex-1 truncate text-[13px] ${node.active ? 'text-ink' : 'text-ink-mute line-through'}`}>
-          {node.name}
-        </span>
-        {node.kind && (
-          <Badge tone="neutral" className="font-mono uppercase text-[10px]">
-            {node.kind}
-          </Badge>
+        {editing ? (
+          <div className="flex flex-1 items-center gap-1.5">
+            <Input
+              autoFocus
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commit();
+                if (e.key === 'Escape') cancel();
+              }}
+              className="h-7 flex-1 text-[13px]"
+              aria-label="Court name"
+            />
+            <Button variant="ghost" size="icon" onClick={commit} disabled={busy} title="Save name">
+              <Check className="h-3.5 w-3.5" />
+            </Button>
+            <Button variant="ghost" size="icon" onClick={cancel} disabled={busy} title="Cancel">
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        ) : (
+          <>
+            <span
+              className={`flex-1 truncate text-[13px] ${node.active ? 'text-ink' : 'text-ink-mute line-through'}`}
+            >
+              {node.name}
+            </span>
+            {node.kind && (
+              <Badge tone="neutral" className="font-mono uppercase text-[10px]">
+                {node.kind}
+              </Badge>
+            )}
+            {node.capacity != null && (
+              <Badge tone="neutral" className="font-mono text-[10px]">
+                {node.capacity}
+              </Badge>
+            )}
+            {!node.active && <Badge tone="warn">Inactive</Badge>}
+            <Button
+              variant="ghost"
+              size="icon"
+              disabled={moveLocked || busy || index === 0}
+              onClick={() => onMove(node, -1)}
+              title="Move up"
+            >
+              <ArrowUp className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              disabled={moveLocked || busy || index === siblingCount - 1}
+              onClick={() => onMove(node, 1)}
+              title="Move down"
+            >
+              <ArrowDown className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              disabled={busy}
+              onClick={() => {
+                setDraft(node.name);
+                setEditing(true);
+              }}
+              title="Rename"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              disabled={busy}
+              onClick={() => onToggle(node)}
+              title={node.active ? 'Deactivate' : 'Reactivate'}
+            >
+              <Power className={`h-3.5 w-3.5 ${node.active ? '' : 'text-ink-mute'}`} />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              disabled={busy}
+              onClick={() => onRemove(node)}
+              title="Delete"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          </>
         )}
-        {node.capacity != null && (
-          <Badge tone="neutral" className="font-mono text-[10px]">
-            {node.capacity}
-          </Badge>
-        )}
-        {!node.active && <Badge tone="warn">Inactive</Badge>}
-        <Button
-          variant="ghost"
-          size="icon"
-          disabled={busyId === node.id}
-          onClick={() => onToggle(node)}
-          title={node.active ? 'Deactivate' : 'Reactivate'}
-        >
-          <Power className={`h-3.5 w-3.5 ${node.active ? '' : 'text-ink-mute'}`} />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          disabled={busyId === node.id}
-          onClick={() => onRemove(node)}
-          title="Delete"
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </Button>
       </li>
-      {node.children.map((c) => (
+      {node.children.map((c, i, arr) => (
         <CourtRow
           key={c.id}
           node={c}
           depth={depth + 1}
+          index={i}
+          siblingCount={arr.length}
           busyId={busyId}
+          moveLocked={moveLocked}
           onToggle={onToggle}
           onRemove={onRemove}
+          onRename={onRename}
+          onMove={onMove}
         />
       ))}
     </>

@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
 import { ScheduleEditor } from './schedule-editor';
 import { ClosuresManager } from './closures-manager';
 
@@ -10,13 +11,16 @@ export default async function ScheduleSettings() {
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const { data: venue } = await supabase
-    .from('venues')
-    .select('id, sport, currency, timezone')
-    .eq('owner_id', user.id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const venue = dataOrThrow(
+    await supabase
+      .from('venues')
+      .select('id, sport, currency, timezone')
+      .eq('owner_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    'venue',
+  );
   if (!venue) redirect('/onboarding/profile');
 
   const { data: offered } = await supabase

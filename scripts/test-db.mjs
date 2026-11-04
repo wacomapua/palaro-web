@@ -11,6 +11,10 @@
 // 4. Applies supabase/tests/setup/*.sql (shared fixture helpers).
 // 5. Runs every supabase/tests/*.test.sql through psql and fails on any
 //    `not ok`, a plan mismatch, or any SQL error.
+// 6. Runs every supabase/tests/*.test.mjs with node, for what one psql
+//    session cannot test (two sessions, locks). Each prints TAP and reaches
+//    this run's container through PALARO_DBTEST_CONTAINER and
+//    PALARO_DBTEST_PASSWORD. Judged like the SQL files.
 // The container is always removed, whatever happens. No other container is
 // ever touched: every docker command names this run's container explicitly.
 import { spawnSync } from 'node:child_process';
@@ -51,6 +55,12 @@ export function evaluateTap(output) {
 export function migrationFiles(dir) {
   return readdirSync(dir)
     .filter((f) => f.endsWith('.sql') && statSync(join(dir, f)).isFile())
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+export function sessionTestFiles(dir) {
+  return readdirSync(dir)
+    .filter((f) => f.endsWith('.test.mjs') && statSync(join(dir, f)).isFile())
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
@@ -143,8 +153,7 @@ function main() {
     }
     let failed = 0;
     let total = 0;
-    for (const f of files) {
-      const r = psql('postgres', readFileSync(join(TESTS, f), 'utf8'), ['-t', '-A']);
+    const judge = (f, r, exitWhy) => {
       const out = `${r.stdout}${r.stderr}`;
       const verdict = evaluateTap(r.stdout);
       total += verdict.ran;
@@ -153,11 +162,24 @@ function main() {
       process.stdout.write(out.endsWith('\n') ? out : `${out}\n`);
       if (!ok) {
         failed++;
-        const why = r.status !== 0 ? [`psql exited ${r.status} (SQL error)`] : [];
+        const why = r.status !== 0 ? [exitWhy(r.status)] : [];
         console.log(`# FAIL ${f}: ${[...why, ...verdict.failures].join('; ')}`);
       }
+    };
+    for (const f of files) {
+      judge(f, psql('postgres', readFileSync(join(TESTS, f), 'utf8'), ['-t', '-A']), (s) => `psql exited ${s} (SQL error)`);
     }
-    console.log(`\n# ${files.length - failed}/${files.length} files passed, ${total} assertions`);
+    const sessionFiles = sessionTestFiles(TESTS);
+    for (const f of sessionFiles) {
+      const r = spawnSync(process.execPath, [join(TESTS, f)], {
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+        env: { ...process.env, PALARO_DBTEST_CONTAINER: name, PALARO_DBTEST_PASSWORD: password },
+      });
+      judge(f, r, (s) => `node exited ${s}`);
+    }
+    const count = files.length + sessionFiles.length;
+    console.log(`\n# ${count - failed}/${count} files passed, ${total} assertions`);
     process.exitCode = failed ? 1 : 0;
   } finally {
     cleanup();

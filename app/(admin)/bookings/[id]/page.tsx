@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { formatMoney, formatDateTime } from '@/lib/format';
 import { DEFAULT_TIMEZONE } from '@/lib/tz';
-import { computeRefund, formatRefundPolicy, DEFAULT_REFUND_POLICY } from '@/lib/refund';
+import { computeRefund, formatRefundPolicy, resolveRefundPolicy } from '@/lib/refund';
 import type { RefundPolicy, VenueBooking } from '@/lib/types/db';
 
 type BookingWithJoins = VenueBooking & {
@@ -63,7 +63,12 @@ export default async function BookingDetail({
   const slot = { ...booking.slot, court: booking.slot.court };
   const captain = booking.captain;
 
-  const policy = slot.refund_policy ?? venue.default_refund_policy ?? DEFAULT_REFUND_POLICY;
+  // The policy the booking was sold under, as cancel_venue_booking resolves it.
+  const policy = resolveRefundPolicy(
+    booking.refund_policy_snapshot,
+    slot.refund_policy,
+    venue.default_refund_policy,
+  );
   const refund = computeRefund(booking.total_cents, slot.starts_at, policy);
 
   return (
