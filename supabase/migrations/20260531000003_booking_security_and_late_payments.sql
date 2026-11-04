@@ -16,6 +16,7 @@
 --   5. book_venue_slot (C3, P4 part): service_role only. It was executable by
 --      PUBLIC, so anyone with the anon key could hold any slot in any
 --      player's name without paying.
+--   6. pg_cron: installed here and both release jobs (re)scheduled by name.
 
 -- =============================================================================
 -- 1. venue_slots_remaining (C5)
@@ -517,3 +518,37 @@ grant execute on function public.record_venue_refund_result(uuid, boolean, text,
 -- (20260531000002).
 revoke execute on function public.book_venue_slot(uuid, uuid, uuid, int, int, numeric) from public, anon, authenticated;
 grant execute on function public.book_venue_slot(uuid, uuid, uuid, int, int, numeric) to service_role;
+
+-- =============================================================================
+-- 6. Release jobs (team-manager PR #7 review, finding 8)
+-- =============================================================================
+-- 0005 (release-stale-venue-holds) and 20260529000004
+-- (release-stale-shared-bookings) only scheduled their jobs when pg_cron was
+-- already installed and silently skipped otherwise, leaving held slots and
+-- abandoned tee time bookings unreleased forever. Install pg_cron and
+-- schedule both, dropping any job of the same name first so a rerun (or a
+-- database where the earlier migrations did schedule them) ends with exactly
+-- one of each. Commands as in those migrations.
+create extension if not exists pg_cron;
+
+select cron.unschedule(j.jobid)
+  from cron.job j
+ where j.jobname in ('release-stale-venue-holds', 'release-stale-shared-bookings');
+
+select cron.schedule(
+  'release-stale-venue-holds',
+  '* * * * *',
+  $cron$
+    update public.venue_slots
+       set status = 'available', held_until = null
+     where status = 'held'
+       and held_until is not null
+       and held_until < now()
+  $cron$
+);
+
+select cron.schedule(
+  'release-stale-shared-bookings',
+  '* * * * *',
+  $cron$ select public.release_stale_shared_bookings(15); $cron$
+);
