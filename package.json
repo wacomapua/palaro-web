@@ -9,6 +9,7 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "node --test 'tests/*.test.mjs'",
+    "test:db": "node scripts/test-db.mjs",
     "audit:high": "node scripts/audit-gate.mjs"
   },
   "dependencies": {

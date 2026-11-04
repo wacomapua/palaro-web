@@ -7,6 +7,7 @@ import { cn } from '@/lib/cn';
 const TABS = [
   { href: '/settings/venue', label: 'Venue' },
   { href: '/settings/courts', label: 'Courts' },
+  { href: '/settings/schedule', label: 'Schedule' },
   { href: '/settings/refund-policy', label: 'Refund policy' },
   { href: '/settings/team', label: 'Team' },
 ];
