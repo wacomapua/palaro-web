@@ -10,6 +10,9 @@
 --   3. reinstate_venue_booking(text) (C4, C11 note): a payment that lands on
 --      a booking cancelled before it was paid puts the booking back when the
 --      slot still has room, or returns NULL so payments-webhook refunds it.
+--   4. record_venue_refund_result (C10): payments-process-refunds records
+--      each PayMongo refund outcome; a success lands on the booking and in
+--      transactions.
 
 -- =============================================================================
 -- 1. venue_slots_remaining (C5)
@@ -385,3 +388,119 @@ $$;
 
 revoke execute on function public.reinstate_venue_booking(text) from public, anon, authenticated;
 grant execute on function public.reinstate_venue_booking(text) to service_role;
+
+-- =============================================================================
+-- 4. record_venue_refund_result (C10)
+-- =============================================================================
+-- venue_bookings.refund_amount_cents and refunded_at exist since 0005, and
+-- txn_type 'venue_refund' since 0004; the column statements are no ops kept
+-- for databases that skipped 0005's columns.
+alter table public.venue_bookings add column if not exists refund_amount_cents int not null default 0;
+alter table public.venue_bookings add column if not exists refunded_at timestamptz;
+
+-- Success: the refund row becomes 'succeeded' with the PayMongo refund id;
+-- the booking's refund_amount_cents is SET to the sum of its succeeded
+-- refunds (apply_venue_closure already wrote the full amount when it queued
+-- one, so adding would double it) and refunded_at to now; one 'venue_refund'
+-- transactions row is written for the player's receipts
+-- (useMyTransactions reads the user's rows by user_id):
+--   user_id = the booking's captain, amount_cents = the refund (positive,
+--   as every transactions amount is), currency = the venue's, gateway
+--   'paymongo', status 'succeeded', gateway_ref = the PayMongo refund id,
+--   metadata = refund, booking, intent, slot, venue and court ids, reason.
+-- gateway_ref is deliberately not the intent id: payments-webhook resolves
+-- transactions by gateway_ref = intent id with maybeSingle(), so a second
+-- row on the intent would make every redelivery of a paid event fail.
+-- team_id is left null: the captain's team revenue screens (team-manager
+-- useTeamTransactions) sum every succeeded team row as income, so a team
+-- tagged refund would be counted as money in. Venue payouts (palaro-web
+-- payouts page) read venue_bookings, where refunded bookings are already
+-- cancelled or refunded and so out of the next payout.
+-- A repeat success is a no op, and a failure never downgrades a success.
+-- Failure: 'failed' with last_error; attempts belong to the claim.
+-- Lock order: booking row, then refund row (as apply_venue_closure, which
+-- locks bookings before queueing refunds).
+create or replace function public.record_venue_refund_result(
+  _refund_id uuid,
+  _succeeded boolean,
+  _paymongo_refund_id text,
+  _error text
+) returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  _booking_id uuid;
+  _b public.venue_bookings;
+  _r public.venue_refunds;
+  _slot public.venue_slots;
+  _currency text;
+begin
+  if _succeeded is null then
+    raise exception 'Refund outcome must be true or false' using errcode = 'invalid_parameter_value';
+  end if;
+  if _succeeded and nullif(btrim(_paymongo_refund_id), '') is null then
+    raise exception 'A successful refund needs its PayMongo refund id' using errcode = 'invalid_parameter_value';
+  end if;
+
+  select r.booking_id into _booking_id from public.venue_refunds r where r.id = _refund_id;
+  if _booking_id is null then
+    raise exception 'Refund % not found', _refund_id using errcode = 'no_data_found';
+  end if;
+
+  select b.* into _b from public.venue_bookings b where b.id = _booking_id for update;
+  select r.* into _r from public.venue_refunds r where r.id = _refund_id for update;
+
+  if _r.status = 'succeeded' then
+    return;
+  end if;
+
+  if not _succeeded then
+    update public.venue_refunds
+       set status = 'failed',
+           last_error = coalesce(nullif(btrim(_error), ''), 'Refund failed')
+     where id = _r.id;
+    return;
+  end if;
+
+  update public.venue_refunds
+     set status = 'succeeded',
+         paymongo_refund_id = btrim(_paymongo_refund_id),
+         last_error = null
+   where id = _r.id;
+
+  update public.venue_bookings b
+     set refund_amount_cents = (
+           select coalesce(sum(r.amount_cents), 0)::int
+             from public.venue_refunds r
+            where r.booking_id = b.id and r.status = 'succeeded'
+         ),
+         refunded_at = now(),
+         updated_at = now()
+   where b.id = _b.id;
+
+  select s.* into _slot from public.venue_slots s where s.id = _b.slot_id;
+  select v.currency into _currency from public.venues v where v.id = _b.venue_id;
+
+  insert into public.transactions (
+    team_id, user_id, type, amount_cents, currency,
+    platform_fee_cents, gateway, gateway_ref, status, metadata
+  ) values (
+    null, _b.captain_user_id, 'venue_refund', _r.amount_cents, coalesce(_currency, 'PHP'),
+    0, 'paymongo', btrim(_paymongo_refund_id), 'succeeded',
+    jsonb_build_object(
+      'refund_id', _r.id,
+      'booking_id', _b.id,
+      'reason', _r.reason,
+      'intent_id', _b.paymongo_intent_id,
+      'slot_id', _b.slot_id,
+      'venue_id', _b.venue_id,
+      'court_id', _slot.court_id
+    )
+  );
+end;
+$$;
+
+revoke execute on function public.record_venue_refund_result(uuid, boolean, text, text) from public, anon, authenticated;
+grant execute on function public.record_venue_refund_result(uuid, boolean, text, text) to service_role;
