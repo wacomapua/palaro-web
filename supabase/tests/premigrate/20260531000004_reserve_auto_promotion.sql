@@ -11,6 +11,8 @@
 --   E3 upcoming, 2 seats: seat 3 (beyond slot_count) released, a reserve
 --      waiting, seats 1 and 2 taken.
 --   E4 already played: seat 2 released, a reserve waiting. History stays.
+--   E5 upcoming but cancelled, E6 upcoming but already marked completed:
+--      seat 2 released, a reserve waiting. History stays.
 
 insert into auth.users (id, email) values
   ('00000000-5eed-0004-0000-00000000aa01', 'pm4-captain@seed.test'),
@@ -29,6 +31,10 @@ insert into public.events (id, team_id, title, starts_at, slot_count, created_by
   ('00000000-5eed-0004-0000-00000000e003', '00000000-5eed-0004-0000-00000000b001', 'E3', now() + interval '3 days', 2, '00000000-5eed-0004-0000-00000000aa01'),
   ('00000000-5eed-0004-0000-00000000e004', '00000000-5eed-0004-0000-00000000b001', 'E4', now() - interval '2 days', 2, '00000000-5eed-0004-0000-00000000aa01');
 
+insert into public.events (id, team_id, title, starts_at, slot_count, created_by, status) values
+  ('00000000-5eed-0004-0000-00000000e005', '00000000-5eed-0004-0000-00000000b001', 'E5', now() + interval '3 days', 2, '00000000-5eed-0004-0000-00000000aa01', 'cancelled'),
+  ('00000000-5eed-0004-0000-00000000e006', '00000000-5eed-0004-0000-00000000b001', 'E6', now() + interval '3 days', 2, '00000000-5eed-0004-0000-00000000aa01', 'completed');
+
 insert into public.event_slots (id, event_id, user_id, slot_type, status, position, created_at)
 select ('00000000-5eed-0004-0000-00000000' || id)::uuid, ('00000000-5eed-0004-0000-00000000' || ev)::uuid,
        ('00000000-5eed-0004-0000-00000000' || usr)::uuid, st::public.slot_type, ss::public.slot_status, pos, now() - age
@@ -46,5 +52,11 @@ from (values
   ('f304', 'e003', 'aa05', 'reserve',   'reserved', 1, interval '30 minutes'),
   ('f401', 'e004', 'aa02', 'confirmed', 'paid',     1, interval '3 days'),
   ('f402', 'e004', 'aa03', 'confirmed', 'released', 2, interval '3 days'),
-  ('f403', 'e004', 'aa04', 'reserve',   'reserved', 1, interval '3 days')
+  ('f403', 'e004', 'aa04', 'reserve',   'reserved', 1, interval '3 days'),
+  ('f501', 'e005', 'aa02', 'confirmed', 'paid',     1, interval '2 hours'),
+  ('f502', 'e005', 'aa03', 'confirmed', 'released', 2, interval '2 hours'),
+  ('f503', 'e005', 'aa04', 'reserve',   'reserved', 1, interval '30 minutes'),
+  ('f601', 'e006', 'aa02', 'confirmed', 'paid',     1, interval '2 hours'),
+  ('f602', 'e006', 'aa03', 'confirmed', 'released', 2, interval '2 hours'),
+  ('f603', 'e006', 'aa04', 'reserve',   'reserved', 1, interval '30 minutes')
 ) as v(id, ev, usr, st, ss, pos, age);

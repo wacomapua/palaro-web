@@ -2,7 +2,7 @@
 -- trigger existed (review finding 5). The rows were seeded by
 -- supabase/tests/premigrate/20260531000004_reserve_auto_promotion.sql.
 begin;
-select plan(9);
+select plan(11);
 
 create temp view pm4 as
   select right(event_id::text, 4) as e, right(user_id::text, 4) as u, slot_type::text as t, position as p, status::text as s
@@ -25,9 +25,17 @@ select results_eq($$select u, t, p, s from pm4 where e = 'e004' order by t, p$$,
   $$values ('aa02', 'confirmed', 1, 'paid'), ('aa03', 'confirmed', 2, 'released'), ('aa04', 'reserve', 1, 'reserved')$$,
   'E4: an event already played is left as it was');
 
+select results_eq($$select u, t, p, s from pm4 where e = 'e005' order by t, p$$,
+  $$values ('aa02', 'confirmed', 1, 'paid'), ('aa03', 'confirmed', 2, 'released'), ('aa04', 'reserve', 1, 'reserved')$$,
+  'E5: an upcoming event that was cancelled is left as it was');
+select results_eq($$select u, t, p, s from pm4 where e = 'e006' order by t, p$$,
+  $$values ('aa02', 'confirmed', 1, 'paid'), ('aa03', 'confirmed', 2, 'released'), ('aa04', 'reserve', 1, 'reserved')$$,
+  'E6: an upcoming event already marked completed is left as it was');
+
 select is((select count(*)::int from public.event_slots s join public.events e on e.id = s.event_id
-            where s.slot_type = 'confirmed' and s.status = 'released' and e.starts_at > now()), 0,
-  'no upcoming event keeps a released confirmed row');
+            where s.slot_type = 'confirmed' and s.status = 'released' and e.starts_at > now()
+              and e.status not in ('cancelled', 'completed')), 0,
+  'no upcoming event still to be played keeps a released confirmed row');
 
 -- The seat freed in E2 can be claimed now.
 select tests.create_user() as newcomer \gset
