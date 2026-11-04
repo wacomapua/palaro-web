@@ -94,4 +94,42 @@ begin
     json_build_object('sub', _uid, 'role', _role)::text, true);
 end $$;
 
+-- A team (the captain becomes its first member through the teams trigger),
+-- extra members, an event and its event_slots rows.
+create or replace function tests.create_team(_captain uuid, _member_limit int default 50)
+returns uuid language sql as $$
+  insert into public.teams (slug, name, captain_id, member_limit)
+  values ('t-' || substr(md5(random()::text), 1, 12), 'Test Team', _captain, _member_limit)
+  returning id
+$$;
+
+create or replace function tests.add_member(_team uuid, _user uuid)
+returns void language sql as $$
+  insert into public.team_memberships (team_id, user_id, role, status)
+  values (_team, _user, 'member', 'active')
+$$;
+
+create or replace function tests.create_event(_team uuid, _slot_count int default 2)
+returns uuid language sql as $$
+  insert into public.events (team_id, title, starts_at, slot_count, reserve_count, created_by)
+  select _team, 'Test Match', now() + interval '3 days', _slot_count, 3, t.captain_id
+    from public.teams t where t.id = _team
+  returning id
+$$;
+
+-- created_at defaults to clock_timestamp() so rows made in one test
+-- transaction still have a join order; pass it to set the order explicitly.
+create or replace function tests.create_event_slot(
+  _event uuid,
+  _user uuid,
+  _type public.slot_type,
+  _position int,
+  _status public.slot_status default 'reserved',
+  _created_at timestamptz default null
+) returns uuid language sql as $$
+  insert into public.event_slots (event_id, user_id, slot_type, status, position, created_at)
+  values (_event, _user, _type, _status, _position, coalesce(_created_at, clock_timestamp()))
+  returning id
+$$;
+
 grant execute on all functions in schema tests to anon, authenticated, service_role;
