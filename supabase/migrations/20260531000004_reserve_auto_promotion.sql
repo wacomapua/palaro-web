@@ -165,8 +165,11 @@ begin
 end;
 $$;
 
-create or replace function public.event_slots_promote_on_reserve_insert()
-returns trigger
+-- Fills every free seat 1..slot_count of an event with the reserves who
+-- joined first, lowest seat first, under the event lock. Used when a reserve
+-- joins and by the backfill below.
+create or replace function public.event_slots_fill_free_seats(_event_id uuid)
+returns void
 language plpgsql
 security definer
 set search_path = public
@@ -179,11 +182,11 @@ declare
 begin
   select e.slot_count into _slot_count
     from public.events e
-   where e.id = NEW.event_id
+   where e.id = _event_id
      for no key update;
 
   if _slot_count is null then
-    return null;
+    return;
   end if;
 
   loop
@@ -192,7 +195,7 @@ begin
      where p <> all(_taken)
        and not exists (
          select 1 from public.event_slots s
-          where s.event_id = NEW.event_id
+          where s.event_id = _event_id
             and s.slot_type = 'confirmed'
             and s.position = p
        )
@@ -201,7 +204,7 @@ begin
 
     exit when _seat is null;
 
-    _reserve := public.event_slots_next_reserve(NEW.event_id);
+    _reserve := public.event_slots_next_reserve(_event_id);
     exit when _reserve is null;
 
     begin
@@ -214,12 +217,23 @@ begin
       _taken := _taken || _seat;
     end;
   end loop;
+end;
+$$;
 
+create or replace function public.event_slots_promote_on_reserve_insert()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  perform public.event_slots_fill_free_seats(NEW.event_id);
   return null;
 end;
 $$;
 
 revoke execute on function public.event_slots_next_reserve(uuid) from public, anon, authenticated;
+revoke execute on function public.event_slots_fill_free_seats(uuid) from public, anon, authenticated;
 revoke execute on function public.event_slots_promote_on_release() from public, anon, authenticated;
 revoke execute on function public.event_slots_promote_on_reserve_insert() from public, anon, authenticated;
 
@@ -239,3 +253,30 @@ create trigger event_slots_promote_on_reserve_insert
   for each row
   when (NEW.slot_type = 'reserve')
   execute function public.event_slots_promote_on_reserve_insert();
+
+-- Seats released before this trigger existed (PR #11 review, finding 5):
+-- the old flow left a confirmed 'released' row holding its seat, so the seat
+-- stayed blocked and nobody was promoted. For events still to come, delete
+-- those rows as a release now does and fill the freed seats in join order.
+-- Events already played or cancelled keep their history.
+do $$
+declare
+  _events uuid[];
+  _e uuid;
+begin
+  with gone as (
+    delete from public.event_slots s
+     using public.events e
+     where e.id = s.event_id
+       and s.slot_type = 'confirmed'
+       and s.status = 'released'
+       and e.starts_at > now()
+       and e.status not in ('cancelled', 'completed')
+    returning s.event_id
+  )
+  select coalesce(array_agg(distinct event_id), '{}') into _events from gone;
+
+  foreach _e in array _events loop
+    perform public.event_slots_fill_free_seats(_e);
+  end loop;
+end $$;
