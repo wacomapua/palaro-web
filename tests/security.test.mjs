@@ -41,3 +41,15 @@ test('image optimizer allows nothing remote when the Supabase URL is unset', asy
   const { default: config } = await import(`../next.config.ts?case=unset${Date.now()}`);
   assert.deepEqual(config.images?.remotePatterns ?? [], []);
 });
+
+// The tests import next.config.ts directly, which needs Node's native type
+// stripping (on by default from 22.18). supabase-js also needs Node 22.
+test('package.json pins Node 22 at 22.18 or newer', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  const range = pkg.engines?.node;
+  assert.ok(range, 'engines.node is not set');
+  const m = /^\^(\d+)\.(\d+)\.(\d+)$/.exec(range);
+  assert.ok(m, `engines.node should be a caret range, got ${range}`);
+  assert.ok(atLeast(`${m[1]}.${m[2]}.${m[3]}`, [22, 18, 0]) && Number(m[1]) === 22, `engines.node ${range} should be ^22.18.0 or a later 22.x`);
+});
