@@ -13,6 +13,9 @@
 --   4. record_venue_refund_result (C10): payments-process-refunds records
 --      each PayMongo refund outcome; a success lands on the booking and in
 --      transactions.
+--   5. book_venue_slot (C3, P4 part): service_role only. It was executable by
+--      PUBLIC, so anyone with the anon key could hold any slot in any
+--      player's name without paying.
 
 -- =============================================================================
 -- 1. venue_slots_remaining (C5)
@@ -504,3 +507,13 @@ $$;
 
 revoke execute on function public.record_venue_refund_result(uuid, boolean, text, text) from public, anon, authenticated;
 grant execute on function public.record_venue_refund_result(uuid, boolean, text, text) to service_role;
+
+-- =============================================================================
+-- 5. book_venue_slot: service_role only (C3, P4 part)
+-- =============================================================================
+-- 20260529000002 created it with plain CREATE FUNCTION, so PUBLIC (and the
+-- anon and authenticated defaults) could execute it. Its only caller is
+-- payments-create-intent with the service role. Body unchanged
+-- (20260531000002).
+revoke execute on function public.book_venue_slot(uuid, uuid, uuid, int, int, numeric) from public, anon, authenticated;
+grant execute on function public.book_venue_slot(uuid, uuid, uuid, int, int, numeric) to service_role;
