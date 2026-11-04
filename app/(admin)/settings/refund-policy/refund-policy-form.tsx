@@ -48,8 +48,9 @@ export function RefundPolicyForm({
       <CardHeader>
         <CardTitle>Default refund policy</CardTitle>
         <CardDescription>
-          Applied to every booking, most-lenient first. A customer who cancels
-          earlier than a tier&apos;s threshold gets that tier&apos;s refund.
+          A customer who cancels at least a tier&apos;s hours before the start
+          gets that tier&apos;s refund. Changes apply to new bookings only:
+          existing bookings keep the policy they were booked under.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">

@@ -162,6 +162,9 @@ export type VenueBooking = {
   refund_amount_cents: number;
   refund_reason: string | null;
   refunded_at: string | null;
+  // Policy in force when the booking was made (owner decision 1). null only
+  // on bookings cancelled before the column existed.
+  refund_policy_snapshot: RefundPolicy | null;
   payout_id: string | null;
   metadata: Json | null;
   created_at: string;

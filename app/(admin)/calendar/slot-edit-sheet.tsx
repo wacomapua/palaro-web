@@ -385,8 +385,9 @@ function SingleSlotEditor({
       return;
     }
 
-    // null persists as "inherit the venue default"; booking cancellation resolves
-    // slot.refund_policy ?? venue default.
+    // null persists as "inherit the venue default". book_venue_slot snapshots
+    // slot.refund_policy ?? venue default onto each new booking, so saving here
+    // never changes bookings already made.
     const refundPolicyToSave: RefundPolicy | null = refundOverride
       ? { tiers: normalizeTiers(refundOverride.tiers) }
       : null;
@@ -569,6 +570,10 @@ function SingleSlotEditor({
               />
               Override refund policy for this slot
             </label>
+            <p className="text-xs text-ink-mute">
+              Changes apply to new bookings only. Bookings already made on this
+              slot keep the policy they were booked under.
+            </p>
 
             {refundOverride !== null ? (
               <div className="space-y-3 rounded-md border border-line/60 bg-bg-2/40 p-3">

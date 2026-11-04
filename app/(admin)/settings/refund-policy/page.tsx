@@ -26,8 +26,8 @@ export default async function RefundPolicyPage() {
     <div className="px-8 py-8 max-w-2xl">
       <h1 className="text-3xl font-medium tracking-tight">Refund policy</h1>
       <p className="mt-1 text-sm text-ink-dim">
-        Default tiers applied to every slot. You can override per-slot with a
-        stricter policy from the calendar.
+        Default tiers for every slot without its own override (set one from
+        the calendar). Changes apply to new bookings only.
       </p>
 
       <RefundPolicyForm venueId={venue.id} initialPolicy={policy} />
