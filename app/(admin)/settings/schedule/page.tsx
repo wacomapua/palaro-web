@@ -23,32 +23,47 @@ export default async function ScheduleSettings() {
   );
   if (!venue) redirect('/onboarding/profile');
 
-  const { data: offered } = await supabase
-    .from('venue_sports')
-    .select('sport')
-    .eq('venue_id', venue.id)
-    .eq('active', true);
+  // Every read throws on failure (dataOrThrow). The editor saves a whole week
+  // over a group's templates, so it must never render on templates that
+  // failed to load (price_9_cents before 20260601000001) and look empty.
+  const offered = dataOrThrow(
+    await supabase
+      .from('venue_sports')
+      .select('sport')
+      .eq('venue_id', venue.id)
+      .eq('active', true),
+    'sports',
+  );
   const sports = [
     venue.sport,
     ...(offered ?? []).map((o) => o.sport).filter((s) => s !== venue.sport),
   ];
 
-  const { data: courts } = await supabase
-    .from('venue_courts')
-    .select('id, sport, name, active, metadata')
-    .eq('venue_id', venue.id)
-    .order('sort_order');
+  const courts = dataOrThrow(
+    await supabase
+      .from('venue_courts')
+      .select('id, sport, name, active, metadata')
+      .eq('venue_id', venue.id)
+      .order('sort_order'),
+    'courts',
+  );
 
-  const { data: templates } = await supabase
-    .from('venue_slot_templates')
-    .select('id, court_id, day_of_week, start_time, end_time, slot_minutes, price_cents, price_9_cents, active')
-    .eq('venue_id', venue.id);
+  const templates = dataOrThrow(
+    await supabase
+      .from('venue_slot_templates')
+      .select('id, court_id, day_of_week, start_time, end_time, slot_minutes, price_cents, price_9_cents, active')
+      .eq('venue_id', venue.id),
+    'weekly schedule',
+  );
 
-  const { data: closures } = await supabase
-    .from('venue_closures')
-    .select('id, court_id, starts_at, ends_at, reason')
-    .eq('venue_id', venue.id)
-    .order('starts_at', { ascending: false });
+  const closures = dataOrThrow(
+    await supabase
+      .from('venue_closures')
+      .select('id, court_id, starts_at, ends_at, reason')
+      .eq('venue_id', venue.id)
+      .order('starts_at', { ascending: false }),
+    'closures',
+  );
 
   return (
     <div className="px-8 py-8 max-w-4xl space-y-12">

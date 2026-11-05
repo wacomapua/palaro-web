@@ -34,30 +34,42 @@ export default async function CalendarPage({
   const ymd = params.d ?? ymdInTz(new Date(), tz);
   const { start: dayStart, end: dayEnd } = dayRangeUtc(ymd, tz);
 
-  const { data: courts } = await supabase
-    .from('venue_courts')
-    .select('*')
-    .eq('venue_id', venue.id)
-    .order('sort_order');
+  // Every read throws on failure (dataOrThrow): read as empty, a column the
+  // database lacks (holes before 20260601000001) would show every tee time
+  // as open instead of an error.
+  const courts = dataOrThrow(
+    await supabase
+      .from('venue_courts')
+      .select('*')
+      .eq('venue_id', venue.id)
+      .order('sort_order'),
+    'courts',
+  );
 
-  const { data: slots } = await supabase
-    .from('venue_slots')
-    .select('*')
-    .eq('venue_id', venue.id)
-    .gte('starts_at', dayStart.toISOString())
-    .lt('starts_at', dayEnd.toISOString())
-    .order('starts_at');
+  const slots = dataOrThrow(
+    await supabase
+      .from('venue_slots')
+      .select('*')
+      .eq('venue_id', venue.id)
+      .gte('starts_at', dayStart.toISOString())
+      .lt('starts_at', dayEnd.toISOString())
+      .order('starts_at'),
+    'slots',
+  );
 
-  const { data: bookings } = await supabase
-    .from('venue_bookings')
-    .select('id, slot_id, captain_user_id, team_id, status, party_size, holes, created_at, captain:profiles!captain_user_id(display_name, avatar_url)')
-    .eq('venue_id', venue.id)
-    .in('status', ['paid', 'pending_payment', 'completed'])
-    .in(
-      'slot_id',
-      (slots ?? []).map((s) => s.id),
-    )
-    .order('created_at');
+  const bookings = dataOrThrow(
+    await supabase
+      .from('venue_bookings')
+      .select('id, slot_id, captain_user_id, team_id, status, party_size, holes, created_at, captain:profiles!captain_user_id(display_name, avatar_url)')
+      .eq('venue_id', venue.id)
+      .in('status', ['paid', 'pending_payment', 'completed'])
+      .in(
+        'slot_id',
+        (slots ?? []).map((s) => s.id),
+      )
+      .order('created_at'),
+    'bookings',
+  );
 
   return (
     <CourtCalendar
