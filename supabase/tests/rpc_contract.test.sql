@@ -5,6 +5,7 @@
 -- role. Call sites:
 --   venue_slots_remaining       src/hooks/queries/slotRemaining.ts:12 (via src/lib/slotAvailability.ts:33)
 --   book_venue_slot             supabase/functions/payments-create-intent/index.ts:125
+--                               (C14: _holes int default 18 is the 7th argument)
 --   complete_venue_booking      payments-create-intent/index.ts:178, payments-webhook/index.ts:338
 --   release_held_booking_admin  payments-create-intent/index.ts:239, payments-webhook/index.ts:371
 --   reinstate_venue_booking     payments-webhook/index.ts:280
@@ -21,7 +22,7 @@ create temp table rpc_contract (fn text, args text, result text, client boolean)
 insert into rpc_contract values
   ('venue_slots_remaining', '_slot_ids uuid[]', 'TABLE(slot_id uuid, remaining integer)', true),
   ('book_venue_slot',
-   '_slot_id uuid, _captain_user_id uuid, _team_id uuid, _party_size integer, _hold_minutes integer, _platform_fee_pct numeric',
+   '_slot_id uuid, _captain_user_id uuid, _team_id uuid, _party_size integer, _hold_minutes integer, _platform_fee_pct numeric, _holes integer',
    'TABLE(booking_id uuid, slot_id uuid, total_cents integer, platform_fee_cents integer, payout_cents integer, currency text, party_size integer)',
    false),
   ('complete_venue_booking', '_intent_id text', 'TABLE(booking_id uuid, event_id uuid, status venue_booking_status)', false),
