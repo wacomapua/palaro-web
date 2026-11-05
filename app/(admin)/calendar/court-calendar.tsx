@@ -10,8 +10,10 @@ import { cn } from '@/lib/cn';
 import { formatMoney } from '@/lib/format';
 import { addDaysYmd, ymdInTz, hourInTz, formatTimeInTz, formatYmd } from '@/lib/tz';
 import { SPORT_CONFIGS } from '@/lib/sport-presets';
+import { buildTeeSheets, isTeeSheetCourt } from '@/lib/tee-sheet';
 import type { RefundPolicy, VenueCourt, VenueSlot, VenueSlotStatus } from '@/lib/types/db';
 import { SlotEditSheet } from './slot-edit-sheet';
+import { SPOT_CLASS, TeeSheetList } from './tee-sheet';
 
 const SPORT_EMOJI = Object.fromEntries(SPORT_CONFIGS.map((c) => [c.sport, c.emoji]));
 
@@ -24,8 +26,13 @@ interface BookingShape {
   slot_id: string;
   status: string;
   party_size: number;
+  holes: number;
   captain: { display_name: string | null; avatar_url: string | null } | null;
 }
+
+// 'tee': golf courses as tee sheets. 'courts': every other court on the
+// hourly timeline.
+export type CalendarView = 'tee' | 'courts';
 
 export function CourtCalendar({
   venue,
@@ -33,6 +40,7 @@ export function CourtCalendar({
   courts,
   slots,
   bookings,
+  view: requestedView,
 }: {
   venue: {
     id: string;
@@ -46,13 +54,31 @@ export function CourtCalendar({
   courts: VenueCourt[];
   slots: VenueSlot[];
   bookings: BookingShape[];
+  view: CalendarView | null; // from ?v=, null when not given
 }) {
   const router = useRouter();
   const tz = venue.timezone;
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<{ kind: 'new'; courtId: string; hour: number } | { kind: 'edit'; slotId: string } | null>(null);
 
-  const tree = useMemo(() => buildCourtTree(courts), [courts]);
+  // Golf courses get a tee sheet (C14); every other court, including range
+  // bays made before golf dropped them, stays on the hourly timeline.
+  const teeCourts = useMemo(() => courts.filter(isTeeSheetCourt), [courts]);
+  const timelineCourts = useMemo(() => courts.filter((c) => !isTeeSheetCourt(c)), [courts]);
+  const bothViews = teeCourts.length > 0 && timelineCourts.length > 0;
+  const view: CalendarView =
+    teeCourts.length === 0
+      ? 'courts'
+      : timelineCourts.length === 0
+        ? 'tee'
+        : requestedView ?? (venue.sport === 'golf' ? 'tee' : 'courts');
+
+  const teeSheets = useMemo(
+    () => buildTeeSheets({ courts: teeCourts, slots, bookings, tz }),
+    [teeCourts, slots, bookings, tz],
+  );
+
+  const tree = useMemo(() => buildCourtTree(timelineCourts), [timelineCourts]);
   const slotsByCourt = useMemo(() => {
     const m = new Map<string, VenueSlot[]>();
     for (const s of slots) {
@@ -74,8 +100,12 @@ export function CourtCalendar({
     return m;
   }, [bookings]);
 
+  function calendarUrl(d: string, v: CalendarView = view) {
+    return bothViews ? `/calendar?d=${d}&v=${v}` : `/calendar?d=${d}`;
+  }
+
   function shiftDay(delta: number) {
-    router.push(`/calendar?d=${addDaysYmd(date, delta)}`);
+    router.push(calendarUrl(addDaysYmd(date, delta)));
   }
 
   function toggleCollapse(id: string) {
@@ -97,6 +127,29 @@ export function CourtCalendar({
           <h1 className="text-xl font-medium tracking-tight">{venue.name}</h1>
           <span className="text-sm text-ink-dim">·</span>
           <p className="text-sm text-ink-dim capitalize">{venue.sport}</p>
+          {bothViews && (
+            <div className="ml-2 inline-flex rounded-md border border-line/70 bg-bg-1 p-0.5" role="group" aria-label="Calendar view">
+              {(
+                [
+                  ['tee', 'Tee sheet'],
+                  ['courts', 'Courts'],
+                ] as const
+              ).map(([v, label]) => (
+                <button
+                  key={v}
+                  type="button"
+                  aria-pressed={view === v}
+                  onClick={() => router.push(calendarUrl(date, v))}
+                  className={cn(
+                    'rounded-[5px] px-3 py-1 text-xs transition-colors',
+                    view === v ? 'bg-brand/15 text-brand' : 'text-ink-dim hover:text-ink',
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="icon" onClick={() => shiftDay(-1)}>
@@ -106,134 +159,155 @@ export function CourtCalendar({
           <Button variant="ghost" size="icon" onClick={() => shiftDay(1)}>
             <ChevronRight className="h-4 w-4" />
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => router.push(`/calendar?d=${ymdInTz(new Date(), tz)}`)}>
+          <Button variant="ghost" size="sm" onClick={() => router.push(calendarUrl(ymdInTz(new Date(), tz)))}>
             Today
           </Button>
         </div>
       </header>
 
-      <div className="flex-1 overflow-auto">
-        <div className="min-w-[960px]">
-          {/* Hour ruler */}
-          <div className="sticky top-0 z-10 grid grid-cols-[200px_1fr] border-b border-line/50 bg-bg-0">
-            <div className="px-3 py-2 text-[11px] uppercase tracking-wide text-ink-mute">
-              Court
+      {view === 'tee' ? (
+        <div className="flex-1 overflow-auto">
+          <TeeSheetList
+            sheets={teeSheets}
+            date={date}
+            currency={venue.currency}
+            onEdit={(slotId) => setEditing({ kind: 'edit', slotId })}
+            onAdd={(courtId, hour) => setEditing({ kind: 'new', courtId, hour })}
+          />
+        </div>
+      ) : (
+        <div className="flex-1 overflow-auto">
+          <div className="min-w-[960px]">
+            {/* Hour ruler */}
+            <div className="sticky top-0 z-10 grid grid-cols-[200px_1fr] border-b border-line/50 bg-bg-0">
+              <div className="px-3 py-2 text-[11px] uppercase tracking-wide text-ink-mute">
+                Court
+              </div>
+              <div className="relative h-9">
+                {HOURS.map((h, i) => (
+                  <div
+                    key={h}
+                    className="absolute top-0 flex h-full items-center border-l border-line/40 px-2 text-[11px] text-ink-mute font-mono"
+                    style={{ left: i * HOUR_PX, width: HOUR_PX }}
+                  >
+                    {h}:00
+                  </div>
+                ))}
+              </div>
             </div>
-            <div className="relative h-9">
-              {HOURS.map((h, i) => (
+
+            {/* Court rows */}
+            {flatRows.map((row) => {
+              const isCollapsed = collapsed.has(row.node.id);
+              const courtSlots = slotsByCourt.get(row.node.id) ?? [];
+
+              return (
                 <div
-                  key={h}
-                  className="absolute top-0 flex h-full items-center border-l border-line/40 px-2 text-[11px] text-ink-mute font-mono"
-                  style={{ left: i * HOUR_PX, width: HOUR_PX }}
+                  key={row.node.id}
+                  className="grid grid-cols-[200px_1fr] border-b border-line/40"
+                  style={{ height: ROW_PX }}
                 >
-                  {h}:00
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Court rows */}
-          {flatRows.map((row) => {
-            const isCollapsed = collapsed.has(row.node.id);
-            const courtSlots = slotsByCourt.get(row.node.id) ?? [];
-
-            return (
-              <div
-                key={row.node.id}
-                className="grid grid-cols-[200px_1fr] border-b border-line/40"
-                style={{ height: ROW_PX }}
-              >
-                <button
-                  onClick={() => row.hasChildren && toggleCollapse(row.node.id)}
-                  className={cn(
-                    'flex items-center justify-between gap-2 border-r border-line/40 px-3 text-left text-[13px] transition-colors',
-                    row.hasChildren && 'hover:bg-bg-1',
-                  )}
-                  style={{ paddingLeft: 12 + row.depth * 14 }}
-                >
-                  <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                    {row.hasChildren && (
-                      <ChevronDown
-                        className={cn(
-                          'h-3 w-3 text-ink-mute transition-transform',
-                          isCollapsed && '-rotate-90',
-                        )}
+                  <button
+                    onClick={() => row.hasChildren && toggleCollapse(row.node.id)}
+                    className={cn(
+                      'flex items-center justify-between gap-2 border-r border-line/40 px-3 text-left text-[13px] transition-colors',
+                      row.hasChildren && 'hover:bg-bg-1',
+                    )}
+                    style={{ paddingLeft: 12 + row.depth * 14 }}
+                  >
+                    <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                      {row.hasChildren && (
+                        <ChevronDown
+                          className={cn(
+                            'h-3 w-3 text-ink-mute transition-transform',
+                            isCollapsed && '-rotate-90',
+                          )}
+                        />
+                      )}
+                      {row.depth === 0 && SPORT_EMOJI[row.node.sport] && (
+                        <span className="leading-none" title={row.node.sport}>
+                          {SPORT_EMOJI[row.node.sport]}
+                        </span>
+                      )}
+                      <span className="truncate text-ink">{row.node.name}</span>
+                    </div>
+                    {/* When collapsed, show inline mini-grid of children's status — the screenshot-worthy detail */}
+                    {row.hasChildren && isCollapsed && (
+                      <MiniGrid
+                        childIds={row.descendantIds}
+                        slotsByCourt={slotsByCourt}
                       />
                     )}
-                    {row.depth === 0 && SPORT_EMOJI[row.node.sport] && (
-                      <span className="leading-none" title={row.node.sport}>
-                        {SPORT_EMOJI[row.node.sport]}
-                      </span>
+                    {row.node.capacity && !isCollapsed && (
+                      <Badge tone="neutral" className="font-mono text-[10px]">
+                        {row.node.capacity}
+                      </Badge>
                     )}
-                    <span className="truncate text-ink">{row.node.name}</span>
+                  </button>
+
+                  <div
+                    className="relative"
+                    onClick={(e) => {
+                      // Click on empty cell creates a new slot at that hour.
+                      const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
+                      const x = e.clientX - rect.left;
+                      const hourIdx = Math.floor(x / HOUR_PX);
+                      const hour = HOURS[hourIdx];
+                      if (hour !== undefined) {
+                        setEditing({ kind: 'new', courtId: row.node.id, hour });
+                      }
+                    }}
+                  >
+                    {/* Hour gridlines */}
+                    {HOURS.map((_, i) => (
+                      <div
+                        key={i}
+                        className="absolute top-0 h-full border-l border-line/30"
+                        style={{ left: i * HOUR_PX }}
+                      />
+                    ))}
+
+                    {/* Slot blocks */}
+                    {courtSlots.map((s) => (
+                      <SlotBlock
+                        key={s.id}
+                        slot={s}
+                        bookings={bookingsBySlot.get(s.id) ?? []}
+                        currency={venue.currency}
+                        tz={tz}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditing({ kind: 'edit', slotId: s.id });
+                        }}
+                      />
+                    ))}
                   </div>
-                  {/* When collapsed, show inline mini-grid of children's status — the screenshot-worthy detail */}
-                  {row.hasChildren && isCollapsed && (
-                    <MiniGrid
-                      childIds={row.descendantIds}
-                      slotsByCourt={slotsByCourt}
-                    />
-                  )}
-                  {row.node.capacity && !isCollapsed && (
-                    <Badge tone="neutral" className="font-mono text-[10px]">
-                      {row.node.capacity}
-                    </Badge>
-                  )}
-                </button>
-
-                <div
-                  className="relative"
-                  onClick={(e) => {
-                    // Click on empty cell creates a new slot at that hour.
-                    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-                    const x = e.clientX - rect.left;
-                    const hourIdx = Math.floor(x / HOUR_PX);
-                    const hour = HOURS[hourIdx];
-                    if (hour !== undefined) {
-                      setEditing({ kind: 'new', courtId: row.node.id, hour });
-                    }
-                  }}
-                >
-                  {/* Hour gridlines */}
-                  {HOURS.map((_, i) => (
-                    <div
-                      key={i}
-                      className="absolute top-0 h-full border-l border-line/30"
-                      style={{ left: i * HOUR_PX }}
-                    />
-                  ))}
-
-                  {/* Slot blocks */}
-                  {courtSlots.map((s) => (
-                    <SlotBlock
-                      key={s.id}
-                      slot={s}
-                      bookings={bookingsBySlot.get(s.id) ?? []}
-                      currency={venue.currency}
-                      tz={tz}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setEditing({ kind: 'edit', slotId: s.id });
-                      }}
-                    />
-                  ))}
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
 
-          {flatRows.length === 0 && <EmptyCalendar />}
+            {flatRows.length === 0 && <EmptyCalendar />}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Legend footer */}
-      <footer className="flex items-center gap-4 border-t border-line/50 px-8 py-2.5 text-[11px] text-ink-mute">
-        <Legend dot="bg-brand" label="Booked" />
-        <Legend dot="bg-warn" label="Held" />
-        <Legend dot="bg-bg-2 border border-dashed border-line" label="Available" />
-        <Legend dot="bg-line" label="Closed" />
-        <span className="ml-auto">Click an empty hour to add a slot</span>
-      </footer>
+      {view === 'tee' ? (
+        <footer className="flex items-center gap-4 border-t border-line/50 px-8 py-2.5 text-[11px] text-ink-mute">
+          <Legend dot={SPOT_CLASS.paid} label="Paid golfer" />
+          <Legend dot={SPOT_CLASS.pending} label="Awaiting payment" />
+          <Legend dot={SPOT_CLASS.open} label="Open spot" />
+          <span className="ml-auto">Click a tee time to edit it</span>
+        </footer>
+      ) : (
+        <footer className="flex items-center gap-4 border-t border-line/50 px-8 py-2.5 text-[11px] text-ink-mute">
+          <Legend dot="bg-brand" label="Booked" />
+          <Legend dot="bg-warn" label="Held" />
+          <Legend dot="bg-bg-2 border border-dashed border-line" label="Available" />
+          <Legend dot="bg-line" label="Closed" />
+          <span className="ml-auto">Click an empty hour to add a slot</span>
+        </footer>
+      )}
 
       {editing && (
         <SlotEditSheet

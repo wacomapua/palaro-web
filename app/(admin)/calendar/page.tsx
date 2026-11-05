@@ -7,7 +7,7 @@ import { CourtCalendar } from './court-calendar';
 export default async function CalendarPage({
   searchParams,
 }: {
-  searchParams: Promise<{ d?: string }>;
+  searchParams: Promise<{ d?: string; v?: string }>;
 }) {
   const supabase = await createClient();
   const {
@@ -50,13 +50,14 @@ export default async function CalendarPage({
 
   const { data: bookings } = await supabase
     .from('venue_bookings')
-    .select('id, slot_id, captain_user_id, team_id, status, party_size, captain:profiles!captain_user_id(display_name, avatar_url)')
+    .select('id, slot_id, captain_user_id, team_id, status, party_size, holes, created_at, captain:profiles!captain_user_id(display_name, avatar_url)')
     .eq('venue_id', venue.id)
     .in('status', ['paid', 'pending_payment', 'completed'])
     .in(
       'slot_id',
       (slots ?? []).map((s) => s.id),
-    );
+    )
+    .order('created_at');
 
   return (
     <CourtCalendar
@@ -65,6 +66,7 @@ export default async function CalendarPage({
       courts={courts ?? []}
       slots={slots ?? []}
       bookings={(bookings ?? []) as never}
+      view={params.v === 'tee' || params.v === 'courts' ? params.v : null}
     />
   );
 }
