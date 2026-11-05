@@ -13,8 +13,9 @@
 --   3. generate_venue_slots copies price_9_cents into
 --      price_per_player_9_cents on shared per player slots.
 --   4. book_venue_slot gains a trailing `_holes int default 18`. The 6
---      argument function is dropped and the 7 argument one created, so
---      PostgREST resolves named argument calls to exactly one function.
+--      argument function is dropped (if it exists) and the 7 argument one
+--      created or replaced, so PostgREST resolves named argument calls to
+--      exactly one function and the migration reapplies cleanly.
 --      Shared per player slots charge party_size times the 9 or 18 hole
 --      price; 9 holes on a tee time with no 9 hole price, or any value
 --      other than 9 or 18, raises 22023. The booking stores holes.
@@ -374,9 +375,9 @@ grant execute on function public.generate_venue_slots(uuid, date) to authenticat
 -- Body as 20260531000002 plus the holes check, the 9 or 18 hole per player
 -- price on shared slots and holes on both inserts. Callers that do not send
 -- _holes (payments-create-intent today) keep booking 18 holes.
-drop function public.book_venue_slot(uuid, uuid, uuid, int, int, numeric);
+drop function if exists public.book_venue_slot(uuid, uuid, uuid, int, int, numeric);
 
-create function public.book_venue_slot(
+create or replace function public.book_venue_slot(
   _slot_id uuid,
   _captain_user_id uuid,
   _team_id uuid,
