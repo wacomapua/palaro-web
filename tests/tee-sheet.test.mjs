@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTeeSheets, holesLabel, isTeeSheetCourt, partyLabel } from '../lib/tee-sheet.ts';
+import { buildTeeSheets, holesLabel, isTeeSheetCourt, partyLabel, teeTimeLabel } from '../lib/tee-sheet.ts';
 import { runInTz } from './run-in-tz.mjs';
 
 const TEE_SHEET_URL = new URL('../lib/tee-sheet.ts', import.meta.url).href;
@@ -220,4 +220,41 @@ test('the device timezone never changes the labels', () => {
   );
   assert.equal(out.time, '7:00 AM');
   assert.equal(out.hour, 7);
+});
+
+// The row is one button; its accessible name has to carry everything the row
+// shows, since the spot markers are colour only (review of PR #12, finding 3).
+test('a tee time row is announced with its parties, holes, payment state and prices', () => {
+  const [sheet] = buildTeeSheets({
+    courts: [court('a', 'Course')],
+    slots: [slot('s', 'a', '07:00')],
+    bookings: [
+      booking('b1', 's', 2, { holes: 9, captain: { display_name: 'Ben Cruz' } }),
+      booking('b2', 's', 1, { holes: 18, status: 'pending_payment', captain: { display_name: 'Carlo Santos' } }),
+    ],
+    tz: MANILA,
+  });
+  assert.equal(
+    clean(teeTimeLabel(sheet.rows[0], 'PHP')),
+    '7:00 AM, Partly booked, 3 of 4 spots taken. ' +
+      'Ben Cruz, Twosome, 9 holes, paid. Carlo Santos, Single, 18 holes, unpaid. ' +
+      'Per golfer: 18 holes ₱2,500, 9 holes ₱1,400. Edit tee time.',
+  );
+});
+
+test('an empty tee time without a 9 hole price, and a closed one', () => {
+  const [sheet] = buildTeeSheets({
+    courts: [court('a', 'Course')],
+    slots: [slot('open', 'a', '07:00', { price_per_player_9_cents: null }), slot('shut', 'a', '07:10', { status: 'closed' })],
+    bookings: [],
+    tz: MANILA,
+  });
+  assert.equal(
+    clean(teeTimeLabel(sheet.rows[0], 'PHP')),
+    '7:00 AM, Open, 0 of 4 spots taken. No bookings. Per golfer: 18 holes ₱2,500, 9 holes not offered. Edit tee time.',
+  );
+  assert.equal(
+    clean(teeTimeLabel(sheet.rows[1], 'PHP')),
+    '7:10 AM, Closed, 0 of 4 spots taken. No bookings. Per golfer: 18 holes ₱2,500, 9 holes ₱1,400. Edit tee time.',
+  );
 });

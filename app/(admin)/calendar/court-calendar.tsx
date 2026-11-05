@@ -293,7 +293,7 @@ export function CourtCalendar({
 
       {/* Legend footer */}
       {view === 'tee' ? (
-        <footer className="flex items-center gap-4 border-t border-line/50 px-8 py-2.5 text-[11px] text-ink-mute">
+        <footer className="flex items-center gap-4 border-t border-line/50 px-8 py-2.5 text-[11px] text-ink-dim">
           <Legend dot={SPOT_CLASS.paid} label="Paid golfer" />
           <Legend dot={SPOT_CLASS.pending} label="Awaiting payment" />
           <Legend dot={SPOT_CLASS.open} label="Open spot" />

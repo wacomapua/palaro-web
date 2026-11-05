@@ -7,6 +7,7 @@
 // instead of drawing them on the hourly court timeline. Times are shown in the
 // venue timezone (lib/tz.ts), never the device's.
 
+import { formatMoney } from './format.ts';
 import { courtSlotModel } from './sport-presets.ts';
 import { formatTimeInTz, tzParts } from './tz.ts';
 import type { GolfHoles, Json, VenueSlotStatus, VenueSport } from '@/lib/types/db';
@@ -178,6 +179,22 @@ function buildRow(slot: TeeSheetSlot, bookings: TeeSheetBooking[], tz: string, p
     price18Cents: slot.price_per_player_cents ?? slot.price_cents,
     price9Cents: slot.price_per_player_9_cents ?? null,
   };
+}
+
+// The accessible name of a tee time row (the row is one button). It says
+// everything the row shows, including what the spot markers say by colour
+// alone: who is on it, their party, holes and whether they have paid, and the
+// prices per golfer.
+export function teeTimeLabel(row: TeeSheetRow, currency: string): string {
+  const parties =
+    row.parties.length === 0
+      ? 'No bookings.'
+      : row.parties.map((p) => `${p.name}, ${p.partyLabel}, ${p.holesLabel}, ${p.pending ? 'unpaid' : 'paid'}.`).join(' ');
+  const nine = row.price9Cents === null ? '9 holes not offered' : `9 holes ${formatMoney(row.price9Cents, currency)}`;
+  return (
+    `${row.time}, ${row.statusLabel}, ${row.booked} of ${row.capacity} spots taken. ${parties} ` +
+    `Per golfer: 18 holes ${formatMoney(row.price18Cents, currency)}, ${nine}. Edit tee time.`
+  );
 }
 
 // One sheet per tee sheet court (in the order given), each with that court's
