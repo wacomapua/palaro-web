@@ -19,7 +19,8 @@ import {
   holesLabel,
   optionalPriceTextToCents,
   priceTextToCents,
-  teeTimePriceColumns,
+  slotWriteColumns,
+  teeSheetRows,
 } from '@/lib/tee-sheet';
 import type { RefundPolicy, VenueCourt, VenueSlot } from '@/lib/types/db';
 
@@ -236,18 +237,16 @@ function TeeSheetGenerator({
     setSubmitting(true);
     setError(null);
 
-    const rows = teeTimes.map((t) => ({
-      venue_id: venueId,
-      court_id: court.id,
-      starts_at: t.toISOString(),
-      ends_at: new Date(t.getTime() + interval * 60_000).toISOString(),
-      ...teeTimePriceColumns(pricePerPlayer, price9PerPlayer),
+    const rows = teeSheetRows({
+      venueId,
+      courtId: court.id,
       currency,
-      status: 'available' as const,
-      booking_mode: 'shared' as const,
-      pricing_mode: 'per_player' as const,
-      max_players: maxPlayers,
-    }));
+      teeTimes,
+      intervalMinutes: interval,
+      priceCents: pricePerPlayer,
+      price9Cents: price9PerPlayer,
+      maxPlayers,
+    });
 
     const supabase = createClient();
     const { error: insErr } = await supabase.from('venue_slots').insert(rows);
@@ -441,11 +440,8 @@ function SingleSlotEditor({
       ? { tiers: normalizeTiers(refundOverride.tiers) }
       : null;
 
-    // A tee time saves its 18 and 9 hole prices per golfer; other slots keep
-    // writing what they always did.
-    const prices = teePricing
-      ? teeTimePriceColumns(priceCents, price9Cents)
-      : { price_cents: priceCents, price_per_player_cents: perPlayer ? priceCents : null };
+    // Prices and players per tee time, as lib/tee-sheet.ts decides them.
+    const written = slotWriteColumns({ shared, perPlayer, priceCents, price9Cents, maxPlayers });
 
     if (isNew && court) {
       const { error: insErr } = await supabase.from('venue_slots').insert({
@@ -453,12 +449,11 @@ function SingleSlotEditor({
         court_id: court.id,
         starts_at: starts.toISOString(),
         ends_at: ends.toISOString(),
-        ...prices,
+        ...written,
         currency,
         status: 'available',
         booking_mode: shared ? 'shared' : 'exclusive',
         pricing_mode: perPlayer ? 'per_player' : 'per_slot',
-        max_players: shared ? maxPlayers : null,
         refund_policy: refundPolicyToSave,
       });
       if (insErr) {
@@ -472,8 +467,7 @@ function SingleSlotEditor({
         .update({
           starts_at: starts.toISOString(),
           ends_at: ends.toISOString(),
-          ...prices,
-          max_players: shared ? maxPlayers : null,
+          ...written,
           refund_policy: refundPolicyToSave,
         })
         .eq('id', existingSlot.id);

@@ -14,10 +14,10 @@ import {
   DAYS,
   GENERATE_MAX_DAYS,
   GENERATE_MAX_ROWS,
-  buildTemplatePayload,
   courtGroups,
   groupLabel,
   offersNineHoles,
+  schedulePayload,
   seedWeek,
   type DaySchedule,
   type ScheduleCourt,
@@ -97,7 +97,7 @@ export function ScheduleEditor({
     setError(null);
     setSavedMsg(null);
     // Validate the whole week before anything is sent.
-    const payload = buildTemplatePayload(days, { ninePrice: nine });
+    const payload = schedulePayload(group, days);
     if (!payload.ok) {
       setError(payload.error);
       return;

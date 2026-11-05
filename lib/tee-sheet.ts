@@ -268,3 +268,65 @@ export function teeTimePriceColumns(
     price_per_player_9_cents: price9Cents,
   };
 }
+
+// What the single slot editor writes on insert or update. A golf tee time
+// (shared, per golfer) saves its 18 and 9 hole prices per golfer and its
+// players per tee time; any other slot writes what it always did and never a
+// 9 hole price.
+export function slotWriteColumns({
+  shared,
+  perPlayer,
+  priceCents,
+  price9Cents,
+  maxPlayers,
+}: {
+  shared: boolean;
+  perPlayer: boolean;
+  priceCents: number;
+  price9Cents: number | null;
+  maxPlayers: number;
+}):
+  | ReturnType<typeof teeTimePriceColumns> & { max_players: number }
+  | { price_cents: number; price_per_player_cents: number | null; max_players: number | null } {
+  if (shared && perPlayer) return { ...teeTimePriceColumns(priceCents, price9Cents), max_players: maxPlayers };
+  return {
+    price_cents: priceCents,
+    price_per_player_cents: perPlayer ? priceCents : null,
+    max_players: shared ? maxPlayers : null,
+  };
+}
+
+// The rows the tee sheet generator inserts: one shared, per golfer tee time
+// per start, each carrying both prices and the players per tee time.
+export function teeSheetRows({
+  venueId,
+  courtId,
+  currency,
+  teeTimes,
+  intervalMinutes,
+  priceCents,
+  price9Cents,
+  maxPlayers,
+}: {
+  venueId: string;
+  courtId: string;
+  currency: string;
+  teeTimes: Date[];
+  intervalMinutes: number;
+  priceCents: number;
+  price9Cents: number | null;
+  maxPlayers: number;
+}) {
+  return teeTimes.map((t) => ({
+    venue_id: venueId,
+    court_id: courtId,
+    starts_at: t.toISOString(),
+    ends_at: new Date(t.getTime() + intervalMinutes * 60_000).toISOString(),
+    ...teeTimePriceColumns(priceCents, price9Cents),
+    currency,
+    status: 'available' as const,
+    booking_mode: 'shared' as const,
+    pricing_mode: 'per_player' as const,
+    max_players: maxPlayers,
+  }));
+}

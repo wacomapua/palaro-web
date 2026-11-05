@@ -6,6 +6,8 @@ import {
   clampPlayersPerTeeTime,
   optionalPriceTextToCents,
   priceTextToCents,
+  slotWriteColumns,
+  teeSheetRows,
   teeTimePriceColumns,
 } from '../lib/tee-sheet.ts';
 
@@ -46,4 +48,69 @@ test('a tee time saves the 18 hole price per golfer and the optional 9 hole pric
     price_per_player_cents: 250000,
     price_per_player_9_cents: null,
   });
+});
+
+// What the single slot editor writes (insert or update), review of PR #12
+// finding 1: dropping the 9 hole price must fail here.
+test('the tee time editor writes the 18 and 9 hole prices and the players per tee time', () => {
+  assert.deepEqual(slotWriteColumns({ shared: true, perPlayer: true, priceCents: 250000, price9Cents: 140000, maxPlayers: 4 }), {
+    price_cents: 250000,
+    price_per_player_cents: 250000,
+    price_per_player_9_cents: 140000,
+    max_players: 4,
+  });
+});
+
+test('clearing the 9 hole price writes null, so 9 holes stop being offered', () => {
+  assert.deepEqual(slotWriteColumns({ shared: true, perPlayer: true, priceCents: 250000, price9Cents: null, maxPlayers: 3 }), {
+    price_cents: 250000,
+    price_per_player_cents: 250000,
+    price_per_player_9_cents: null,
+    max_players: 3,
+  });
+});
+
+test('court slots write what they always did and never a 9 hole price', () => {
+  assert.deepEqual(slotWriteColumns({ shared: false, perPlayer: false, priceCents: 200000, price9Cents: 140000, maxPlayers: 4 }), {
+    price_cents: 200000,
+    price_per_player_cents: null,
+    max_players: null,
+  });
+});
+
+// What the tee sheet generator inserts.
+test('every generated tee time carries both prices, the size and the shared per golfer model', () => {
+  const t1 = new Date('2026-11-05T23:00:00.000Z');
+  const t2 = new Date('2026-11-05T23:10:00.000Z');
+  const rows = teeSheetRows({
+    venueId: 'v',
+    courtId: 'c',
+    currency: 'PHP',
+    teeTimes: [t1, t2],
+    intervalMinutes: 10,
+    priceCents: 250000,
+    price9Cents: 140000,
+    maxPlayers: 4,
+  });
+  assert.deepEqual(rows[0], {
+    venue_id: 'v',
+    court_id: 'c',
+    starts_at: '2026-11-05T23:00:00.000Z',
+    ends_at: '2026-11-05T23:10:00.000Z',
+    price_cents: 250000,
+    price_per_player_cents: 250000,
+    price_per_player_9_cents: 140000,
+    currency: 'PHP',
+    status: 'available',
+    booking_mode: 'shared',
+    pricing_mode: 'per_player',
+    max_players: 4,
+  });
+  assert.equal(rows[1].starts_at, '2026-11-05T23:10:00.000Z');
+  assert.equal(rows[1].price_per_player_9_cents, 140000);
+  assert.equal(
+    teeSheetRows({ venueId: 'v', courtId: 'c', currency: 'PHP', teeTimes: [t1], intervalMinutes: 10, priceCents: 1, price9Cents: null, maxPlayers: 4 })[0]
+      .price_per_player_9_cents,
+    null,
+  );
 });

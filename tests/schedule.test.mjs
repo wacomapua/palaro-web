@@ -8,6 +8,7 @@ import {
   buildTemplatePayload,
   emptyWeek,
   offersNineHoles,
+  schedulePayload,
 } from '../lib/schedule.ts';
 
 const shared = { slotModel: { bookingMode: 'shared', pricingMode: 'per_player', teeIntervalMinutes: 8, maxPlayers: 4 } };
@@ -162,4 +163,30 @@ test('a bad 9 hole price is rejected before anything is saved, naming the day', 
     ok: false,
     error: 'Wed: 9 hole price is too high.',
   });
+});
+
+// What the schedule editor saves for a group, review of PR #12 finding 1:
+// dropping the 9 hole price from a golf tee sheet must fail here.
+test('saving a golf tee sheet group sends each day\'s 9 hole price', () => {
+  const [course, bays] = courtGroups(courts, ['golf']);
+  const w = week({ 1: { open: '06:00', close: '18:00', slotMinutes: 10, price: '2500', price9: '1400' }, 2: { open: '06:00', close: '18:00', slotMinutes: 10, price: '2500', price9: '' } });
+  assert.deepEqual(schedulePayload(course, w), {
+    ok: true,
+    templates: [
+      { day_of_week: 1, start_time: '06:00', end_time: '18:00', slot_minutes: 10, price_cents: 250000, price_9_cents: 140000 },
+      { day_of_week: 2, start_time: '06:00', end_time: '18:00', slot_minutes: 10, price_cents: 250000, price_9_cents: null },
+    ],
+  });
+  assert.deepEqual(schedulePayload(bays, w), {
+    ok: true,
+    templates: [
+      { day_of_week: 1, start_time: '06:00', end_time: '18:00', slot_minutes: 10, price_cents: 250000 },
+      { day_of_week: 2, start_time: '06:00', end_time: '18:00', slot_minutes: 10, price_cents: 250000 },
+    ],
+  }, 'range bays never send one');
+});
+
+test('a bad 9 hole price stops a golf tee sheet save', () => {
+  const [course] = courtGroups(courts, ['golf']);
+  assert.equal(schedulePayload(course, week({ 1: { price9: '1.5' } })).ok, false);
 });

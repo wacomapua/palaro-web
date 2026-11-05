@@ -218,3 +218,12 @@ export function buildTemplatePayload(
   }
   return { ok: true, templates };
 }
+
+// What the schedule editor saves for a group: the week's payload, with the 9
+// hole price only when the group is a golf tee sheet (offersNineHoles).
+export function schedulePayload(
+  group: Pick<CourtGroup, 'sport' | 'bookingMode'>,
+  week: Week,
+): ReturnType<typeof buildTemplatePayload> {
+  return buildTemplatePayload(week, { ninePrice: offersNineHoles(group) });
+}
