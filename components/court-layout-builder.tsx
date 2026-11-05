@@ -16,9 +16,9 @@ import {
 } from '@/lib/sport-presets';
 import type { VenueSport, Json } from '@/lib/types/db';
 
-// One "layout" the owner has added for a sport (e.g. an 18-hole course, OR a
-// driving range, OR N tennis courts). A sport can have many — a golf venue can
-// stack two courses + a range; a club can have a full pitch + 5-a-side courts.
+// One "layout" the owner has added for a sport (e.g. a golf course or N tennis
+// courts). A sport can have many: a golf venue can run two courses, each with
+// its own tee sheet; a club can have a full pitch plus 5-a-side courts.
 interface LayoutInstance {
   id: string;
   presetId: string;
@@ -270,8 +270,8 @@ export function CourtLayoutBuilder({
           ))}
         </div>
         <p className="text-xs text-ink-mute">
-          Add as many as your venue has — e.g. two 18-hole courses plus a driving range, or a
-          full pitch plus separate 5-a-side courts.
+          Add as many as your venue has, for example two golf courses, or a full pitch plus
+          separate 5-a-side courts.
         </p>
       </div>
 

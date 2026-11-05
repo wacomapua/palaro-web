@@ -3,7 +3,7 @@
 // starting point. After picking, they can rename / reorder / set capacity
 // before commit.
 
-import type { VenueSport, BookingMode, PricingMode } from '@/lib/types/db';
+import type { VenueSport, BookingMode, PricingMode, Json } from '@/lib/types/db';
 
 export interface PresetNode {
   // Stable id within the preset so we can reference parent in children.
@@ -55,6 +55,36 @@ export function slotModelForPreset(preset: CourtPreset): CourtSlotModel {
     teeIntervalMinutes: preset.teeIntervalMinutes,
     maxPlayers: preset.maxPlayers,
   };
+}
+
+// The slot model a court was built with, read from
+// venue_courts.metadata.slotModel (written by the court builder). Courts made
+// from presets that are no longer offered (driving range bays, Front 9 and
+// Back 9) keep the model stored on them. Older courts without one: a golf
+// course is a tee sheet, anything else is booked exclusively.
+export function courtSlotModel(
+  court: { sport: VenueSport; kind: string | null; metadata: Json | null } | null | undefined,
+): CourtSlotModel {
+  const raw = (court?.metadata as { slotModel?: Partial<CourtSlotModel> } | null)?.slotModel;
+  if (raw && raw.bookingMode) {
+    return {
+      bookingMode: raw.bookingMode,
+      pricingMode: raw.pricingMode ?? 'per_slot',
+      defaultDurationMinutes: raw.defaultDurationMinutes ?? 120,
+      teeIntervalMinutes: raw.teeIntervalMinutes,
+      maxPlayers: raw.maxPlayers,
+    };
+  }
+  if (court?.sport === 'golf' && court?.kind === 'course') {
+    return {
+      bookingMode: 'shared',
+      pricingMode: 'per_player',
+      defaultDurationMinutes: 10,
+      teeIntervalMinutes: 10,
+      maxPlayers: 4,
+    };
+  }
+  return { bookingMode: 'exclusive', pricingMode: 'per_slot', defaultDurationMinutes: 120 };
 }
 
 export interface SportConfig {
@@ -189,39 +219,19 @@ export const SPORT_CONFIGS: SportConfig[] = [
     label: 'Golf',
     presets: [
       {
+        // The only golf layout (owner decision C14): one tee sheet per course,
+        // no driving range bays and no Front 9 / Back 9 split. Courts made
+        // from the old presets keep working through their stored slotModel.
         id: 'golf-18',
-        label: '18-hole course',
+        label: 'Golf course',
         description:
-          'One course. Players book tee times in groups of up to 4 — a tee sheet, spaced every few minutes, paid per golfer.',
+          'One tee sheet per course. Each tee time takes a single, twosome, threesome or foursome, paid per golfer. Golfers play 18 holes, or 9 holes when you set a 9 hole price.',
         defaultDurationMinutes: 10,
         bookingMode: 'shared',
         pricingMode: 'per_player',
         teeIntervalMinutes: 10,
         maxPlayers: 4,
-        nodes: [{ key: 'course', name: '18-Hole Course', kind: 'course', capacity: 4 }],
-      },
-      {
-        id: 'golf-front-back',
-        label: 'Front 9 + Back 9',
-        description:
-          'Two nine-hole loops bookable independently. Each has its own tee sheet of foursomes.',
-        defaultDurationMinutes: 10,
-        bookingMode: 'shared',
-        pricingMode: 'per_player',
-        teeIntervalMinutes: 10,
-        maxPlayers: 4,
-        nodes: [
-          { key: 'front', name: 'Front 9', kind: 'course', capacity: 4 },
-          { key: 'back', name: 'Back 9', kind: 'course', capacity: 4 },
-        ],
-      },
-      {
-        id: 'golf-range',
-        label: 'Driving range bays',
-        description: 'Independent practice bays, booked per bay for a time block.',
-        defaultDurationMinutes: 60,
-        nodes: [],
-        variableCount: { min: 1, max: 60, default: 20, namePattern: 'Bay {n}' },
+        nodes: [{ key: 'course', name: 'Golf Course', kind: 'course', capacity: 4 }],
       },
     ],
   },

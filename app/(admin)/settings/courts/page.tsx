@@ -46,8 +46,9 @@ export default async function CourtsSettings() {
     <div className="px-8 py-8 max-w-3xl">
       <h1 className="text-3xl font-medium tracking-tight">Courts</h1>
       <p className="mt-1 text-sm text-ink-dim">
-        Every bookable court, field, course, or lane. Add a new layout (e.g. another course or a
-        driving range), rename, reorder, or deactivate what&apos;s out of service.
+        Every bookable court, field, course, or lane. Add a new layout (e.g. another golf course
+        or more tennis courts), rename, reorder, deactivate what&apos;s out of service, or delete a
+        court that has no slots or bookings.
       </p>
 
       <div className="mt-8">

@@ -11,7 +11,7 @@ import { formatMoney } from '@/lib/format';
 import { formatRefundPolicy, normalizeTiers } from '@/lib/refund';
 import { RefundPolicyEditor } from '@/components/refund-policy-editor';
 import { zonedTimeToUtc, tzParts, formatTimeInTz, formatYmd } from '@/lib/tz';
-import type { CourtSlotModel } from '@/lib/sport-presets';
+import { courtSlotModel, type CourtSlotModel } from '@/lib/sport-presets';
 import type { RefundPolicy, VenueCourt, VenueSlot } from '@/lib/types/db';
 
 // "HH:MM" wall-clock time on a venue-local day → UTC instant.
@@ -41,32 +41,6 @@ interface SlotBooking {
   status: string;
   party_size: number;
   captain: { display_name: string | null } | null;
-}
-
-// The court's slot-generation model lives on venue_courts.metadata.slotModel
-// (written by the onboarding builder). Fall back sensibly for older courts.
-function readSlotModel(court: VenueCourt | null | undefined): CourtSlotModel {
-  const raw = (court?.metadata as { slotModel?: Partial<CourtSlotModel> } | null)?.slotModel;
-  if (raw && raw.bookingMode) {
-    return {
-      bookingMode: raw.bookingMode,
-      pricingMode: raw.pricingMode ?? 'per_slot',
-      defaultDurationMinutes: raw.defaultDurationMinutes ?? 120,
-      teeIntervalMinutes: raw.teeIntervalMinutes,
-      maxPlayers: raw.maxPlayers,
-    };
-  }
-  // Legacy / hand-added golf course with no metadata → assume a tee sheet.
-  if (court?.sport === 'golf' && court?.kind === 'course') {
-    return {
-      bookingMode: 'shared',
-      pricingMode: 'per_player',
-      defaultDurationMinutes: 10,
-      teeIntervalMinutes: 10,
-      maxPlayers: 4,
-    };
-  }
-  return { bookingMode: 'exclusive', pricingMode: 'per_slot', defaultDurationMinutes: 120 };
 }
 
 export function SlotEditSheet({
@@ -101,7 +75,7 @@ export function SlotEditSheet({
       ? courts.find((c) => c.id === existingSlot.court_id)
       : null;
 
-  const model = readSlotModel(court);
+  const model = courtSlotModel(court);
   const isTee = model.bookingMode === 'shared' && !!model.teeIntervalMinutes;
 
   if (isTee && isNew && court) {
