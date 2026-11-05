@@ -109,6 +109,19 @@ function toHoles(h: number | null | undefined): GolfHoles {
   return h === 9 ? 9 : 18;
 }
 
+// "9 holes" or "18 holes" for a booking on a shared (golf) tee time, null for
+// anything booked whole. team-manager decides the same way, by booking mode;
+// exclusive slots store 18.
+export function bookingHolesLabel({
+  holes,
+  bookingMode,
+}: {
+  holes: number | null | undefined;
+  bookingMode: string | null | undefined;
+}): string | null {
+  return bookingMode === 'shared' ? holesLabel(toHoles(holes)) : null;
+}
+
 // A golf course booked as a shared tee sheet. Courts made from the old driving
 // range preset are exclusive and stay on the hourly timeline.
 export function isTeeSheetCourt(court: Pick<TeeSheetCourt, 'sport' | 'kind' | 'metadata'>): boolean {
