@@ -17,6 +17,7 @@ import {
   buildTemplatePayload,
   courtGroups,
   groupLabel,
+  offersNineHoles,
   seedWeek,
   type DaySchedule,
   type ScheduleCourt,
@@ -55,10 +56,12 @@ export function ScheduleEditor({
   const group = groups.find((g) => g.key === activeKey) ?? groups[0] ?? null;
   const days = group ? weeks[group.key] : null;
   const shared = group?.bookingMode === 'shared';
+  // A golf tee sheet prices 18 holes and, optionally, 9 holes per golfer (C14).
+  const nine = group ? offersNineHoles(group) : false;
   const label = group ? groupLabel(group, groups, sportLabel) : '';
 
   // Quick-fill row.
-  const [fill, setFill] = useState({ open: '09:00', close: '20:00', slotMinutes: 60, price: '1500' });
+  const [fill, setFill] = useState({ open: '09:00', close: '20:00', slotMinutes: 60, price: '1500', price9: '' });
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -94,7 +97,7 @@ export function ScheduleEditor({
     setError(null);
     setSavedMsg(null);
     // Validate the whole week before anything is sent.
-    const payload = buildTemplatePayload(days);
+    const payload = buildTemplatePayload(days, { ninePrice: nine });
     if (!payload.ok) {
       setError(payload.error);
       return;
@@ -194,9 +197,14 @@ export function ScheduleEditor({
           <Field label={shared ? 'Tee interval (min)' : 'Slot length (min)'}>
             <Input type="number" min={5} max={1440} value={fill.slotMinutes} onChange={(e) => setFill((f) => ({ ...f, slotMinutes: Number(e.target.value) }))} className="w-24" />
           </Field>
-          <Field label={shared ? (group.sport === 'golf' ? 'Price / golfer' : 'Price / player') : 'Price'}>
+          <Field label={nine ? '18 holes / golfer' : shared ? 'Price / player' : 'Price'}>
             <Input inputMode="numeric" value={fill.price} onChange={(e) => setFill((f) => ({ ...f, price: e.target.value.replace(/[^0-9]/g, '') }))} className="w-24" />
           </Field>
+          {nine && (
+            <Field label="9 holes / golfer">
+              <Input inputMode="numeric" placeholder="Not offered" value={fill.price9} onChange={(e) => setFill((f) => ({ ...f, price9: e.target.value.replace(/[^0-9]/g, '') }))} className="w-28" />
+            </Field>
+          )}
           <div className="flex gap-1.5">
             <Button type="button" variant="outline" size="sm" onClick={() => applyFill(DAYS.map((d) => d.dow))}>All days</Button>
             <Button type="button" variant="outline" size="sm" onClick={() => applyFill(WEEKDAYS)}>Weekdays</Button>
@@ -221,12 +229,19 @@ export function ScheduleEditor({
                     <Input type="time" step={300} value={ds.open} onChange={(e) => patchDay(dow, { open: e.target.value })} className="h-8 w-28" />
                     <span className="text-ink-mute">→</span>
                     <Input type="time" step={300} value={ds.close} onChange={(e) => patchDay(dow, { close: e.target.value })} className="h-8 w-28" />
-                    <Input type="number" min={5} max={1440} value={ds.slotMinutes} onChange={(e) => patchDay(dow, { slotMinutes: Number(e.target.value) })} className="h-8 w-20" title="minutes" />
+                    <Input type="number" min={5} max={1440} value={ds.slotMinutes} onChange={(e) => patchDay(dow, { slotMinutes: Number(e.target.value) })} className={nine ? 'h-8 w-16' : 'h-8 w-20'} title="minutes" />
                     <div className="flex items-center gap-1">
                       <span className="text-ink-mute font-mono">₱</span>
-                      <Input inputMode="numeric" value={ds.price} onChange={(e) => patchDay(dow, { price: e.target.value.replace(/[^0-9]/g, '') })} className="h-8 w-24" />
-                      {shared && <span className="text-[11px] text-ink-mute">/{group.sport === 'golf' ? 'golfer' : 'player'}</span>}
+                      <Input inputMode="numeric" value={ds.price} onChange={(e) => patchDay(dow, { price: e.target.value.replace(/[^0-9]/g, '') })} className={nine ? 'h-8 w-20' : 'h-8 w-24'} aria-label={nine ? `${dayLabel} 18 hole price per golfer` : `${dayLabel} price`} />
+                      {shared && <span className="text-[11px] text-ink-mute">{nine ? '18 holes' : '/player'}</span>}
                     </div>
+                    {nine && (
+                      <div className="flex items-center gap-1">
+                        <span className="text-ink-mute font-mono">₱</span>
+                        <Input inputMode="numeric" placeholder="Not offered" value={ds.price9} onChange={(e) => patchDay(dow, { price9: e.target.value.replace(/[^0-9]/g, '') })} className="h-8 w-24 placeholder:text-[12px]" aria-label={`${dayLabel} 9 hole price per golfer`} />
+                        <span className="text-[11px] text-ink-mute">9 holes</span>
+                      </div>
+                    )}
                   </>
                 ) : (
                   <span className="text-xs text-ink-mute">Closed</span>
@@ -239,7 +254,11 @@ export function ScheduleEditor({
         <p className="mt-4 text-[11px] text-ink-mute">
           Applies to {group.courts.map((c) => c.name).join(', ')} ({group.courts.length} active court
           {group.courts.length === 1 ? '' : 's'}).{' '}
-          {shared ? 'Slot length is the tee time interval; price is per player.' : ''}
+          {nine
+            ? 'Slot length is the tee time interval. Prices are per golfer; leave the 9 hole price blank to offer 18 holes only. Each tee time takes up to 4 golfers.'
+            : shared
+              ? 'Slot length is the tee time interval; price is per player.'
+              : ''}
         </p>
 
         {error && <p className="mt-3 text-xs text-danger">{error}</p>}

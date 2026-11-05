@@ -7,7 +7,7 @@
 --   book_venue_slot(..., _holes int default 18), service_role only
 --   reinstate_venue_booking keeps the stored holes and totals
 begin;
-select plan(62);
+select plan(65);
 
 select tests.create_user() as owner \gset
 select tests.create_user() as player \gset
@@ -213,6 +213,34 @@ select results_eq(
   format('select count(*)::int, count(price_per_player_9_cents)::int from public.venue_slots where court_id = %L', :'vg2_course'),
   $$values (3, 0)$$,
   'no template 9 hole price: the tee times offer 18 holes only');
+
+-- ---------------------------------------------------------------------------
+-- The owner's calendar writes tee times straight to venue_slots (RLS): the
+-- tee sheet generator inserts them with a 9 hole price, the tee time editor
+-- changes or clears it.
+-- ---------------------------------------------------------------------------
+select tests.create_user() as stranger \gset
+set local role authenticated;
+select tests.claims(:'owner');
+insert into public.venue_slots (venue_id, court_id, starts_at, ends_at, price_cents, price_per_player_cents,
+                                price_per_player_9_cents, status, booking_mode, pricing_mode, max_players)
+values (:'venue', :'course', :'d'::timestamptz + interval '15 hours', :'d'::timestamptz + interval '15 hours 10 minutes',
+        250000, 250000, 140000, 'available', 'shared', 'per_player', 4)
+returning id as s_owner \gset
+update public.venue_slots set price_per_player_9_cents = 120000 where id = :'s_owner';
+reset role;
+select is((select price_per_player_9_cents from public.venue_slots where id = :'s_owner'), 120000,
+  'the owner can set and change a tee time''s 9 hole price');
+set local role authenticated;
+select tests.claims(:'owner');
+update public.venue_slots set price_per_player_9_cents = null where id = :'s_owner';
+select tests.claims(:'stranger');
+update public.venue_slots set price_per_player_9_cents = 1 where id = :'s_owner';
+reset role;
+select is((select price_per_player_9_cents from public.venue_slots where id = :'s_owner'), null::int,
+  'the owner can stop offering 9 holes; another user cannot set a price');
+select lives_ok(format('select * from public.book_venue_slot(%L, %L, null, 1, 10, 5, 18)', :'s_owner', :'player'),
+  'and the tee time still books 18 holes');
 
 select * from finish();
 rollback;

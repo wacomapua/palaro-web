@@ -41,7 +41,7 @@ export default async function ScheduleSettings() {
 
   const { data: templates } = await supabase
     .from('venue_slot_templates')
-    .select('id, court_id, day_of_week, start_time, end_time, slot_minutes, price_cents, active')
+    .select('id, court_id, day_of_week, start_time, end_time, slot_minutes, price_cents, price_9_cents, active')
     .eq('venue_id', venue.id);
 
   const { data: closures } = await supabase
@@ -51,12 +51,13 @@ export default async function ScheduleSettings() {
     .order('starts_at', { ascending: false });
 
   return (
-    <div className="px-8 py-8 max-w-3xl space-y-12">
+    <div className="px-8 py-8 max-w-4xl space-y-12">
       <div>
         <h1 className="text-3xl font-medium tracking-tight">Schedule</h1>
         <p className="mt-1 text-sm text-ink-dim">
           Set weekly opening hours, slot length, and pricing for each group of courts (a golf
-          course and its range bays are set separately), then generate bookable slots in bulk.
+          course&apos;s tee sheet takes an 18 hole and an optional 9 hole price per golfer), then
+          generate bookable slots in bulk.
           All times are in your venue&apos;s timezone ({venue.timezone}).
         </p>
         <div className="mt-8">

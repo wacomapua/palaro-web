@@ -212,3 +212,46 @@ export function buildTeeSheets({
     };
   });
 }
+
+// ---------------------------------------------------------------------------
+// Tee time editor and generator (C14)
+// ---------------------------------------------------------------------------
+
+// A tee time is a single, twosome, threesome or foursome at most.
+export const MAX_PLAYERS_PER_TEE_TIME = 4;
+
+// "Players per tee time" input: 1 to 4, never below the golfers already
+// booked on it (a tee time made before the limit may hold more than 4). An
+// empty field means a foursome.
+export function clampPlayersPerTeeTime(n: number, booked = 0): number {
+  const want = Number.isFinite(n) ? Math.floor(n) : MAX_PLAYERS_PER_TEE_TIME;
+  const floor = Math.max(1, booked);
+  return Math.max(floor, Math.min(want, Math.max(MAX_PLAYERS_PER_TEE_TIME, booked)));
+}
+
+// Price inputs hold whole currency units as digits.
+export function priceTextToCents(text: string): number {
+  return Math.max(0, Math.round((Number(text) || 0) * 100));
+}
+
+// The optional 9 hole price: blank means 9 hole rounds are not offered.
+export function optionalPriceTextToCents(text: string): number | null {
+  return text.trim() === '' ? null : priceTextToCents(text);
+}
+
+export function centsToPriceText(cents: number | null | undefined): string {
+  return cents == null ? '' : String(Math.round(cents / 100));
+}
+
+// Columns a tee time saves: the 18 hole price per golfer (price_cents mirrors
+// it, as before) and the 9 hole price per golfer, null when not offered.
+export function teeTimePriceColumns(
+  price18Cents: number,
+  price9Cents: number | null,
+): { price_cents: number; price_per_player_cents: number; price_per_player_9_cents: number | null } {
+  return {
+    price_cents: price18Cents,
+    price_per_player_cents: price18Cents,
+    price_per_player_9_cents: price9Cents,
+  };
+}

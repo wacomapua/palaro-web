@@ -7,6 +7,7 @@ import {
   seedWeek,
   buildTemplatePayload,
   emptyWeek,
+  offersNineHoles,
 } from '../lib/schedule.ts';
 
 const shared = { slotModel: { bookingMode: 'shared', pricingMode: 'per_player', teeIntervalMinutes: 8, maxPlayers: 4 } };
@@ -52,8 +53,8 @@ test('seeding a group uses that group\'s templates only', () => {
     { court_id: 'course', day_of_week: 1, start_time: '06:00:00', end_time: '18:00:00', slot_minutes: 10, price_cents: 250000, active: true },
   ];
   const [course, bays] = courtGroups(courts, ['golf']);
-  assert.deepEqual(seedWeek(course, templates)[1], { enabled: true, open: '06:00', close: '18:00', slotMinutes: 10, price: '2500' });
-  assert.deepEqual(seedWeek(bays, templates)[1], { enabled: true, open: '08:00', close: '22:00', slotMinutes: 60, price: '400' });
+  assert.deepEqual(seedWeek(course, templates)[1], { enabled: true, open: '06:00', close: '18:00', slotMinutes: 10, price: '2500', price9: '' });
+  assert.deepEqual(seedWeek(bays, templates)[1], { enabled: true, open: '08:00', close: '22:00', slotMinutes: 60, price: '400', price9: '' });
   assert.equal(seedWeek(bays, templates)[2].enabled, false);
 });
 
@@ -104,4 +105,61 @@ test('rejects bad input before anything is saved, naming the day', () => {
 test('reports the first problem in display order (Mon to Sun)', () => {
   const r = buildTemplatePayload(week({ 0: { price: '' }, 2: { open: '20:00', close: '09:00' } }));
   assert.deepEqual(r, { ok: false, error: 'Tue: closing time must be after opening time.' });
+});
+
+// ---------- C14: 9 hole price per golfer on a golf tee sheet ----------
+
+test('only a golf tee sheet group takes a 9 hole price', () => {
+  const [course, bays] = courtGroups(courts, ['golf']);
+  const [tennis] = courtGroups([court('t1', 'tennis')]);
+  const [sharedOther] = courtGroups([court('x', 'pickleball', shared)]);
+  assert.equal(offersNineHoles(course), true);
+  assert.equal(offersNineHoles(bays), false, 'existing range bays');
+  assert.equal(offersNineHoles(tennis), false);
+  assert.equal(offersNineHoles(sharedOther), false, 'shared but not golf');
+});
+
+test('an empty week has no 9 hole price', () => {
+  assert.equal(emptyWeek(10)[1].price9, '');
+});
+
+test('seeding reads the template 9 hole price, blank when none', () => {
+  const [course] = courtGroups(courts, ['golf']);
+  const templates = [
+    { court_id: 'course', day_of_week: 1, start_time: '06:00:00', end_time: '18:00:00', slot_minutes: 10, price_cents: 250000, price_9_cents: 140000, active: true },
+    { court_id: 'course', day_of_week: 2, start_time: '06:00:00', end_time: '18:00:00', slot_minutes: 10, price_cents: 250000, price_9_cents: null, active: true },
+  ];
+  const w = seedWeek(course, templates);
+  assert.equal(w[1].price9, '1400');
+  assert.equal(w[2].price9, '');
+});
+
+test('a tee sheet payload carries price_9_cents, null when left blank', () => {
+  const r = buildTemplatePayload(
+    week({ 1: { open: '06:00', close: '18:00', slotMinutes: 10, price: '2500', price9: '1400' }, 2: { open: '06:00', close: '18:00', slotMinutes: 10, price: '2500', price9: '' } }),
+    { ninePrice: true },
+  );
+  assert.deepEqual(r, {
+    ok: true,
+    templates: [
+      { day_of_week: 1, start_time: '06:00', end_time: '18:00', slot_minutes: 10, price_cents: 250000, price_9_cents: 140000 },
+      { day_of_week: 2, start_time: '06:00', end_time: '18:00', slot_minutes: 10, price_cents: 250000, price_9_cents: null },
+    ],
+  });
+});
+
+test('other groups never send a 9 hole price, whatever the form holds', () => {
+  const r = buildTemplatePayload(week({ 1: { open: '08:00', close: '22:00', slotMinutes: 60, price: '400', price9: '200' } }));
+  assert.deepEqual(r, { ok: true, templates: [{ day_of_week: 1, start_time: '08:00', end_time: '22:00', slot_minutes: 60, price_cents: 40000 }] });
+});
+
+test('a bad 9 hole price is rejected before anything is saved, naming the day', () => {
+  assert.deepEqual(buildTemplatePayload(week({ 3: { price9: '9a' } }), { ninePrice: true }), {
+    ok: false,
+    error: 'Wed: enter a 9 hole price, or leave it blank to offer 18 holes only.',
+  });
+  assert.deepEqual(buildTemplatePayload(week({ 3: { price9: '21474837' } }), { ninePrice: true }), {
+    ok: false,
+    error: 'Wed: 9 hole price is too high.',
+  });
 });
