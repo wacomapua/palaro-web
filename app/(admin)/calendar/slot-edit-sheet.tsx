@@ -11,7 +11,17 @@ import { formatMoney } from '@/lib/format';
 import { formatRefundPolicy, normalizeTiers } from '@/lib/refund';
 import { RefundPolicyEditor } from '@/components/refund-policy-editor';
 import { zonedTimeToUtc, tzParts, formatTimeInTz, formatYmd } from '@/lib/tz';
-import type { CourtSlotModel } from '@/lib/sport-presets';
+import { courtSlotModel, type CourtSlotModel } from '@/lib/sport-presets';
+import {
+  MAX_PLAYERS_PER_TEE_TIME,
+  centsToPriceText,
+  clampPlayersPerTeeTime,
+  holesLabel,
+  optionalPriceTextToCents,
+  priceTextToCents,
+  slotWriteColumns,
+  teeSheetRows,
+} from '@/lib/tee-sheet';
 import type { RefundPolicy, VenueCourt, VenueSlot } from '@/lib/types/db';
 
 // "HH:MM" wall-clock time on a venue-local day → UTC instant.
@@ -40,33 +50,75 @@ interface SlotBooking {
   id: string;
   status: string;
   party_size: number;
+  holes?: number | null;
   captain: { display_name: string | null } | null;
 }
 
-// The court's slot-generation model lives on venue_courts.metadata.slotModel
-// (written by the onboarding builder). Fall back sensibly for older courts.
-function readSlotModel(court: VenueCourt | null | undefined): CourtSlotModel {
-  const raw = (court?.metadata as { slotModel?: Partial<CourtSlotModel> } | null)?.slotModel;
-  if (raw && raw.bookingMode) {
-    return {
-      bookingMode: raw.bookingMode,
-      pricingMode: raw.pricingMode ?? 'per_slot',
-      defaultDurationMinutes: raw.defaultDurationMinutes ?? 120,
-      teeIntervalMinutes: raw.teeIntervalMinutes,
-      maxPlayers: raw.maxPlayers,
-    };
-  }
-  // Legacy / hand-added golf course with no metadata → assume a tee sheet.
-  if (court?.sport === 'golf' && court?.kind === 'course') {
-    return {
-      bookingMode: 'shared',
-      pricingMode: 'per_player',
-      defaultDurationMinutes: 10,
-      teeIntervalMinutes: 10,
-      maxPlayers: 4,
-    };
-  }
-  return { bookingMode: 'exclusive', pricingMode: 'per_slot', defaultDurationMinutes: 120 };
+// Digits only, no leading zeros.
+function digits(text: string): string {
+  return text.replace(/[^0-9]/g, '').replace(/^0+(?=\d)/, '');
+}
+
+// 18 hole and optional 9 hole price per golfer, side by side.
+function TeePriceFields({
+  price18,
+  price9,
+  onPrice18,
+  onPrice9,
+}: {
+  price18: string;
+  price9: string;
+  onPrice18: (v: string) => void;
+  onPrice9: (v: string) => void;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-4">
+      <div className="space-y-1.5">
+        <Label htmlFor="price">18 holes, per golfer</Label>
+        <div className="flex items-center gap-2">
+          <span className="text-ink-dim font-mono">₱</span>
+          <Input
+            id="price"
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            value={price18}
+            onChange={(e) => onPrice18(digits(e.target.value))}
+            onBlur={() => price18 === '' && onPrice18('0')}
+            placeholder="1500"
+          />
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="price9">
+          9 holes, per golfer <span className="font-normal text-ink-mute">(optional)</span>
+        </Label>
+        <div className="flex items-center gap-2">
+          <span className="text-ink-dim font-mono">₱</span>
+          <Input
+            id="price9"
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            value={price9}
+            onChange={(e) => onPrice9(digits(e.target.value))}
+            placeholder="Not offered"
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function teePriceHint(price18Cents: number, price9Cents: number | null, players: number, currency: string): string {
+  const nine =
+    price9Cents === null
+      ? 'No 9 hole price, so golfers can book 18 holes only.'
+      : `9 holes is ${formatMoney(price9Cents, currency)} per golfer.`;
+  return `A full ${players}-ball of 18 holes brings ${formatMoney(price18Cents * players, currency)}; you net ${formatMoney(
+    Math.round(price18Cents * players * 0.95),
+    currency,
+  )} after the 5% platform fee. ${nine}`;
 }
 
 export function SlotEditSheet({
@@ -101,7 +153,7 @@ export function SlotEditSheet({
       ? courts.find((c) => c.id === existingSlot.court_id)
       : null;
 
-  const model = readSlotModel(court);
+  const model = courtSlotModel(court);
   const isTee = model.bookingMode === 'shared' && !!model.teeIntervalMinutes;
 
   if (isTee && isNew && court) {
@@ -165,9 +217,11 @@ function TeeSheetGenerator({
   const [startTime, setStartTime] = useState(`${String(editing.hour).padStart(2, '0')}:00`);
   const [endTime, setEndTime] = useState(`${String(Math.min(editing.hour + 4, 23)).padStart(2, '0')}:00`);
   const [interval, setInterval] = useState<number>(model.teeIntervalMinutes ?? 10);
-  const [maxPlayers, setMaxPlayers] = useState<number>(model.maxPlayers ?? 4);
-  const [priceText, setPriceText] = useState<string>('1500'); // per player
-  const pricePerPlayer = Math.max(0, Math.round((Number(priceText) || 0) * 100));
+  const [maxPlayers, setMaxPlayers] = useState<number>(clampPlayersPerTeeTime(model.maxPlayers ?? MAX_PLAYERS_PER_TEE_TIME));
+  const [priceText, setPriceText] = useState<string>('1500'); // 18 holes, per golfer
+  const [price9Text, setPrice9Text] = useState<string>(''); // blank: 9 holes not offered
+  const pricePerPlayer = priceTextToCents(priceText);
+  const price9PerPlayer = optionalPriceTextToCents(price9Text);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -183,19 +237,16 @@ function TeeSheetGenerator({
     setSubmitting(true);
     setError(null);
 
-    const rows = teeTimes.map((t) => ({
-      venue_id: venueId,
-      court_id: court.id,
-      starts_at: t.toISOString(),
-      ends_at: new Date(t.getTime() + interval * 60_000).toISOString(),
-      price_cents: pricePerPlayer, // legacy column mirrors per-player price
-      price_per_player_cents: pricePerPlayer,
+    const rows = teeSheetRows({
+      venueId,
+      courtId: court.id,
       currency,
-      status: 'available' as const,
-      booking_mode: 'shared' as const,
-      pricing_mode: 'per_player' as const,
-      max_players: maxPlayers,
-    }));
+      teeTimes,
+      intervalMinutes: interval,
+      priceCents: pricePerPlayer,
+      price9Cents: price9PerPlayer,
+      maxPlayers,
+    });
 
     const supabase = createClient();
     const { error: insErr } = await supabase.from('venue_slots').insert(rows);
@@ -248,31 +299,22 @@ function TeeSheetGenerator({
                 id="max"
                 type="number"
                 min={1}
-                max={6}
+                max={MAX_PLAYERS_PER_TEE_TIME}
                 value={maxPlayers}
-                onChange={(e) => setMaxPlayers(Math.max(1, Number(e.target.value) || 4))}
+                onChange={(e) => setMaxPlayers(clampPlayersPerTeeTime(parseInt(e.target.value, 10)))}
               />
             </div>
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="price">Price per golfer</Label>
-            <div className="flex items-center gap-2">
-              <span className="text-ink-dim font-mono">₱</span>
-              <Input
-                id="price"
-                type="text"
-                inputMode="numeric"
-                value={priceText}
-                onChange={(e) => setPriceText(e.target.value.replace(/[^0-9]/g, '').replace(/^0+(?=\d)/, ''))}
-                onBlur={() => priceText === '' && setPriceText('0')}
-                placeholder="1500"
-              />
-            </div>
+            <TeePriceFields
+              price18={priceText}
+              price9={price9Text}
+              onPrice18={setPriceText}
+              onPrice9={setPrice9Text}
+            />
             <p className="text-xs text-ink-mute">
-              A full {maxPlayers}-ball brings {formatMoney(pricePerPlayer * maxPlayers, currency)};
-              you net {formatMoney(Math.round(pricePerPlayer * maxPlayers * 0.95), currency)} after
-              the 5% platform fee.
+              {teePriceHint(pricePerPlayer, price9PerPlayer, maxPlayers, currency)}
             </p>
           </div>
 
@@ -355,8 +397,14 @@ function SingleSlotEditor({
     ? existingSlot?.price_per_player_cents ?? existingSlot?.price_cents ?? 150_000
     : existingSlot?.price_cents ?? 200_000;
   const [priceText, setPriceText] = useState<string>(String(Math.round(seedPrice / 100)));
-  const priceCents = Math.max(0, Math.round((Number(priceText) || 0) * 100));
-  const [maxPlayers, setMaxPlayers] = useState<number>(existingSlot?.max_players ?? model.maxPlayers ?? 4);
+  const priceCents = priceTextToCents(priceText);
+  // Golf tee times (shared, per golfer): optional 9 hole price, blank = not offered.
+  const teePricing = shared && perPlayer;
+  const [price9Text, setPrice9Text] = useState<string>(centsToPriceText(existingSlot?.price_per_player_9_cents));
+  const price9Cents = optionalPriceTextToCents(price9Text);
+  const [maxPlayers, setMaxPlayers] = useState<number>(
+    existingSlot?.max_players ?? clampPlayersPerTeeTime(model.maxPlayers ?? MAX_PLAYERS_PER_TEE_TIME),
+  );
 
   // Per-slot refund override. null = inherit the venue default policy.
   const [refundOverride, setRefundOverride] = useState<RefundPolicy | null>(
@@ -392,19 +440,20 @@ function SingleSlotEditor({
       ? { tiers: normalizeTiers(refundOverride.tiers) }
       : null;
 
+    // Prices and players per tee time, as lib/tee-sheet.ts decides them.
+    const written = slotWriteColumns({ shared, perPlayer, priceCents, price9Cents, maxPlayers });
+
     if (isNew && court) {
       const { error: insErr } = await supabase.from('venue_slots').insert({
         venue_id: venueId,
         court_id: court.id,
         starts_at: starts.toISOString(),
         ends_at: ends.toISOString(),
-        price_cents: priceCents,
-        price_per_player_cents: perPlayer ? priceCents : null,
+        ...written,
         currency,
         status: 'available',
         booking_mode: shared ? 'shared' : 'exclusive',
         pricing_mode: perPlayer ? 'per_player' : 'per_slot',
-        max_players: shared ? maxPlayers : null,
         refund_policy: refundPolicyToSave,
       });
       if (insErr) {
@@ -418,9 +467,7 @@ function SingleSlotEditor({
         .update({
           starts_at: starts.toISOString(),
           ends_at: ends.toISOString(),
-          price_cents: priceCents,
-          price_per_player_cents: perPlayer ? priceCents : null,
-          max_players: shared ? maxPlayers : null,
+          ...written,
           refund_policy: refundPolicyToSave,
         })
         .eq('id', existingSlot.id);
@@ -473,9 +520,15 @@ function SingleSlotEditor({
               {existingBookings.length > 0 && (
                 <ul className="mt-2 space-y-1 text-sm">
                   {existingBookings.map((b) => (
-                    <li key={b.id} className="flex items-center justify-between">
-                      <span>{b.captain?.display_name ?? 'Player'}</span>
-                      <span className="text-ink-dim">×{b.party_size ?? 1}</span>
+                    <li key={b.id} className="flex items-center justify-between gap-3">
+                      <span className="truncate">{b.captain?.display_name ?? 'Player'}</span>
+                      <span className="whitespace-nowrap text-ink-dim">
+                        ×{b.party_size ?? 1}
+                        {teePricing && (
+                          <span className="ml-2 font-mono text-[12px]">{holesLabel(b.holes === 9 ? 9 : 18)}</span>
+                        )}
+                        {b.status === 'pending_payment' && <span className="ml-2 text-[11px] text-warn">unpaid</span>}
+                      </span>
                     </li>
                   ))}
                 </ul>
@@ -510,19 +563,33 @@ function SingleSlotEditor({
 
           {shared && (
             <div className="space-y-1.5">
-              <Label htmlFor="max">Max players</Label>
+              <Label htmlFor="max">Players per tee time</Label>
               <Input
                 id="max"
                 type="number"
                 min={Math.max(1, bookedPlayers)}
-                max={6}
+                max={Math.max(MAX_PLAYERS_PER_TEE_TIME, bookedPlayers)}
                 value={maxPlayers}
-                onChange={(e) => setMaxPlayers(Math.max(1, Number(e.target.value) || 4))}
+                onChange={(e) => setMaxPlayers(clampPlayersPerTeeTime(parseInt(e.target.value, 10), bookedPlayers))}
                 className="w-32"
               />
             </div>
           )}
 
+          {teePricing ? (
+            <div className="space-y-1.5">
+              <TeePriceFields
+                price18={priceText}
+                price9={price9Text}
+                onPrice18={setPriceText}
+                onPrice9={setPrice9Text}
+              />
+              <p className="text-xs text-ink-mute">{teePriceHint(priceCents, price9Cents, maxPlayers, currency)}</p>
+              <p className="text-xs text-ink-mute">
+                Price changes apply to new bookings only; golfers already booked keep what they paid.
+              </p>
+            </div>
+          ) : (
           <div className="space-y-1.5">
             <Label htmlFor="price">{perPlayer ? 'Price per golfer' : 'Price'}</Label>
             <div className="flex items-center gap-2">
@@ -553,6 +620,7 @@ function SingleSlotEditor({
               )}
             </p>
           </div>
+          )}
 
           <div className="space-y-2">
             <label className="flex cursor-pointer items-center gap-2 text-sm text-ink">

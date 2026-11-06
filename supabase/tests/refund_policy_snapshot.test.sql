@@ -129,11 +129,12 @@ update public.venue_slots set refund_policy = null where id = :'s_override';
 select is((select refund_policy_snapshot from public.venue_bookings where id = :'b_override'), :'strict72'::jsonb,
   'removing the slot override leaves the snapshot');
 
--- 7. book_venue_slot keeps its signature and security.
+-- 7. book_venue_slot keeps its signature (C14 added _holes as a trailing
+--    7th argument) and security.
 select has_function('public', 'book_venue_slot',
-  array['uuid', 'uuid', 'uuid', 'integer', 'integer', 'numeric'], 'book_venue_slot keeps its signature');
+  array['uuid', 'uuid', 'uuid', 'integer', 'integer', 'numeric', 'integer'], 'book_venue_slot keeps its signature');
 select is_definer('public', 'book_venue_slot',
-  array['uuid', 'uuid', 'uuid', 'integer', 'integer', 'numeric'], 'book_venue_slot stays security definer');
+  array['uuid', 'uuid', 'uuid', 'integer', 'integer', 'numeric', 'integer'], 'book_venue_slot stays security definer');
 select is_definer('public', 'cancel_venue_booking', array['uuid', 'text'], 'cancel_venue_booking stays security definer');
 
 select * from finish();

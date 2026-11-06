@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluateTap, migrationFiles, premigrateSeed, sessionTestFiles } from '../scripts/test-db.mjs';
+import { evaluateTap, migrationFiles, mustReapply, premigrateSeed, reapplyScript, sessionTestFiles } from '../scripts/test-db.mjs';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -83,4 +83,26 @@ test('finds the premigrate seed named after a migration, if any', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// Every timestamped migration must run twice cleanly (a failed or repeated
+// `db push` reapplies it). The 000N_ files predate that rule and create types
+// and policies without guards.
+test('timestamped migrations must reapply cleanly; the early 000N_ files are exempt', () => {
+  assert.equal(mustReapply('20260601000001_golf_holes.sql'), true);
+  assert.equal(mustReapply('20260529000001_multisport_golf.sql'), true);
+  assert.equal(mustReapply('0001_initial_schema.sql'), false);
+  assert.equal(mustReapply('0008_venue_marketplace_review_followups.sql'), false);
+  // Committed before the rule and cannot be edited; 20260529000003 reconciles it.
+  assert.equal(mustReapply('20260529000002_golf_shared_booking_rpcs.sql'), false);
+  assert.equal(mustReapply('20260529000003_reconcile_review_followups.sql'), true);
+});
+
+test('a reapply runs the migration again inside a transaction that is rolled back', () => {
+  const script = reapplyScript('alter table t add column if not exists c int;');
+  assert.match(script, /^begin;\n/);
+  assert.match(script, /alter table t add column if not exists c int;/);
+  assert.match(script, /\nrollback;\n$/);
+  // A trailing comment line in the migration cannot swallow the rollback.
+  assert.match(reapplyScript('select 1; -- done'), /-- done\n;\nrollback;\n$/);
 });

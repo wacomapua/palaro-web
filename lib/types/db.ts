@@ -43,6 +43,8 @@ export type VenueBookingStatus =
   | 'refunded'
   | 'completed';
 export type VenuePayoutStatus = 'pending' | 'paid' | 'failed';
+// A golf round (venue_bookings.holes).
+export type GolfHoles = 9 | 18;
 
 export type Profile = {
   id: string;
@@ -128,7 +130,11 @@ export type VenueSlot = {
   ends_at: string;
   price_cents: number;
   // Per-player price, used when pricing_mode = 'per_player' (e.g. golf tee times).
+  // On a golf tee time this is the 18 hole price.
   price_per_player_cents: number | null;
+  // Per golfer 9 hole price on a golf tee time; null means 9 hole rounds are
+  // not offered on it (C14).
+  price_per_player_9_cents: number | null;
   currency: string;
   status: VenueSlotStatus;
   // 'exclusive' (court sports) or 'shared' (golf tee times, up to max_players).
@@ -154,6 +160,9 @@ export type VenueBooking = {
   // Number of players this booking brings. For shared (golf) slots the sum of
   // party_size across active bookings must not exceed slot.max_players.
   party_size: number;
+  // Holes booked (C14). Golf tee times: 9 or 18 as the golfer chose. Every
+  // other booking stores 18.
+  holes: GolfHoles;
   total_cents: number;
   platform_fee_cents: number;
   payout_cents: number;
@@ -180,6 +189,9 @@ export type VenueSlotTemplate = {
   end_time: string;
   slot_minutes: number;
   price_cents: number;
+  // Shared (golf) groups only: per golfer 9 hole price copied onto generated
+  // tee times; null means no 9 hole rounds.
+  price_9_cents: number | null;
   refund_policy: RefundPolicy | null;
   active: boolean;
   paused_until: string | null;

@@ -35,3 +35,33 @@ function offenders() {
 test('server files that read venues and redirect use dataOrThrow', () => {
   assert.deepEqual(offenders(), []);
 });
+
+// Review of PR #12, finding 4: these pages read the golf columns (holes,
+// price_per_player_9_cents, price_9_cents). If the web app is deployed
+// before 20260601000001 is applied, PostgREST answers 400 for an unknown
+// column; read as empty data, tee times would all show Open, bookings would
+// look empty and the schedule editor would save an empty week over the saved
+// templates. Every read on them must go through dataOrThrow, so a failed
+// load renders the error page instead.
+const GOLF_PAGES = [
+  'app/(admin)/calendar/page.tsx',
+  'app/(admin)/bookings/page.tsx',
+  'app/(admin)/bookings/[id]/page.tsx',
+  'app/(admin)/settings/schedule/page.tsx',
+];
+
+function unguardedReads(file) {
+  const src = readFileSync(join(ROOT, file), 'utf8').replace(/\s+/g, ' ');
+  const reads = src.match(/await supabase ?\.from\(/g) ?? [];
+  const guarded = src.match(/dataOrThrow\( ?await supabase ?\.from\(/g) ?? [];
+  return { reads: reads.length, unguarded: reads.length - guarded.length };
+}
+
+test('the calendar, bookings and schedule pages throw on any failed read', () => {
+  const found = Object.fromEntries(GOLF_PAGES.map((f) => [f, unguardedReads(f)]));
+  for (const [file, { reads }] of Object.entries(found)) assert.ok(reads > 0, `${file} has no reads to check`);
+  assert.deepEqual(
+    Object.entries(found).filter(([, r]) => r.unguarded > 0).map(([f, r]) => `${f}: ${r.unguarded} of ${r.reads}`),
+    [],
+  );
+});

@@ -7,7 +7,9 @@
 // 3. Applies supabase/migrations/*.sql in file name order as postgres, each in
 //    its own transaction (as the Supabase CLI does). Before a migration V,
 //    supabase/tests/premigrate/V (if present) runs the same way, so tests can
-//    seed the data a migration has to carry forward.
+//    seed the data a migration has to carry forward. Right after a
+//    timestamped migration is applied it is run once more inside a rolled
+//    back transaction, so one that cannot be reapplied fails the run.
 // 4. Applies supabase/tests/setup/*.sql (shared fixture helpers).
 // 5. Runs every supabase/tests/*.test.sql through psql and fails on any
 //    `not ok`, a plan mismatch, or any SQL error.
@@ -62,6 +64,24 @@ export function sessionTestFiles(dir) {
   return readdirSync(dir)
     .filter((f) => f.endsWith('.test.mjs') && statSync(join(dir, f)).isFile())
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+// Timestamped migrations (YYYYMMDDHHMMSS_name.sql) must reapply cleanly, as a
+// repeated or partly failed `db push` would run them again. The early 000N_
+// files create types and policies without guards and are exempt, as is one
+// committed timestamped file that recreates book_venue_slot with a bare
+// `create function` (20260529000003 reconciles it; committed migrations are
+// never edited). Every other one reapplied cleanly when this rule was added.
+const REAPPLY_EXEMPT = new Set(['20260529000002_golf_shared_booking_rpcs.sql']);
+
+export function mustReapply(name) {
+  return /^\d{14}_.+\.sql$/.test(name) && !REAPPLY_EXEMPT.has(name);
+}
+
+// A migration run again inside a transaction that is always rolled back. The
+// newline before `;` keeps a trailing `--` comment from swallowing it.
+export function reapplyScript(sql) {
+  return `begin;\n${sql}\n;\nrollback;\n`;
 }
 
 // Seed file to run just before migration `name`, or null.
@@ -139,9 +159,11 @@ function main() {
     for (const f of migrations) {
       const seed = premigrateSeed(PREMIGRATE, f);
       if (seed) applyOrDie(`premigrate/${f}`, 'postgres', readFileSync(seed, 'utf8'), ['--single-transaction']);
-      applyOrDie(f, 'postgres', readFileSync(join(MIGRATIONS, f), 'utf8'), ['--single-transaction']);
+      const sql = readFileSync(join(MIGRATIONS, f), 'utf8');
+      applyOrDie(f, 'postgres', sql, ['--single-transaction']);
+      if (mustReapply(f)) applyOrDie(`${f} a second time (migrations must reapply cleanly)`, 'postgres', reapplyScript(sql));
     }
-    console.log(`# applied ${migrations.length} migrations`);
+    console.log(`# applied ${migrations.length} migrations, ${migrations.filter(mustReapply).length} of them twice`);
     for (const f of migrationFiles(SETUP)) {
       applyOrDie(`setup/${f}`, 'postgres', readFileSync(join(SETUP, f), 'utf8'), ['--single-transaction']);
     }

@@ -6,13 +6,19 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { formatMoney, formatDateTime } from '@/lib/format';
 import { DEFAULT_TIMEZONE } from '@/lib/tz';
+import { bookingHolesLabel } from '@/lib/tee-sheet';
 import type { VenueBooking } from '@/lib/types/db';
 
 type BookingRow = Pick<
   VenueBooking,
-  'id' | 'status' | 'total_cents' | 'payout_cents' | 'created_at' | 'party_size'
+  'id' | 'status' | 'total_cents' | 'payout_cents' | 'created_at' | 'party_size' | 'holes'
 > & {
-  slot: { starts_at: string; ends_at: string; court: { name: string } | null } | null;
+  slot: {
+    starts_at: string;
+    ends_at: string;
+    booking_mode: string | null;
+    court: { name: string } | null;
+  } | null;
   captain: { display_name: string | null; phone: string | null; email: string | null } | null;
 };
 
@@ -36,17 +42,25 @@ export default async function BookingsPage() {
   if (!venue) redirect('/onboarding/profile');
   const tz = venue.timezone || DEFAULT_TIMEZONE;
 
-  const { data: bookingsRaw } = await supabase
-    .from('venue_bookings')
-    .select(`
-      id, status, total_cents, payout_cents, created_at, party_size,
-      slot:venue_slots(starts_at, ends_at, court:venue_courts(name)),
-      captain:profiles!captain_user_id(display_name, phone, email)
-    `)
-    .eq('venue_id', venue.id)
-    .order('created_at', { ascending: false })
-    .limit(100);
+  // Throws on failure (dataOrThrow) so a missing column (holes before
+  // 20260601000001) shows an error, not an empty bookings list.
+  const bookingsRaw = dataOrThrow(
+    await supabase
+      .from('venue_bookings')
+      .select(`
+        id, status, total_cents, payout_cents, created_at, party_size, holes,
+        slot:venue_slots(starts_at, ends_at, booking_mode, court:venue_courts(name)),
+        captain:profiles!captain_user_id(display_name, phone, email)
+      `)
+      .eq('venue_id', venue.id)
+      .order('created_at', { ascending: false })
+      .limit(100),
+    'bookings',
+  );
   const bookings = bookingsRaw as unknown as BookingRow[] | null;
+  // Golf tee time bookings carry the round the golfer chose (C14).
+  const holesFor = (b: BookingRow) => bookingHolesLabel({ holes: b.holes, bookingMode: b.slot?.booking_mode });
+  const showHoles = (bookings ?? []).some((b) => holesFor(b) !== null);
 
   return (
     <div className="px-8 py-8">
@@ -69,6 +83,7 @@ export default async function BookingsPage() {
                   <th>Court</th>
                   <th>Captain</th>
                   <th className="text-right">Players</th>
+                  {showHoles && <th className="text-right">Holes</th>}
                   <th className="text-right">Total</th>
                   <th className="text-right">Your cut</th>
                   <th className="text-right">Status</th>
@@ -95,6 +110,9 @@ export default async function BookingsPage() {
                       </Link>
                     </td>
                     <td className="text-right font-mono tnum text-ink-dim">{b.party_size ?? 1}</td>
+                    {showHoles && (
+                      <td className="text-right font-mono tnum text-ink-dim">{holesFor(b)}</td>
+                    )}
                     <td className="text-right font-mono tnum">
                       {formatMoney(b.total_cents, venue.currency)}
                     </td>

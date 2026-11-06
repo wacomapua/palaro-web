@@ -24,6 +24,7 @@ export interface ScheduleTemplate {
   end_time: string;
   slot_minutes: number;
   price_cents: number;
+  price_9_cents?: number | null;
   active: boolean;
 }
 
@@ -32,7 +33,8 @@ export interface DaySchedule {
   open: string; // HH:MM
   close: string;
   slotMinutes: number;
-  price: string; // major units, digits only
+  price: string; // major units, digits only (18 holes on a golf tee sheet)
+  price9: string; // golf tee sheets: 9 hole price per golfer, '' = not offered
 }
 
 export type Week = Record<number, DaySchedule>;
@@ -51,6 +53,8 @@ export interface TemplateInput {
   end_time: string;
   slot_minutes: number;
   price_cents: number;
+  // Golf tee sheet groups only (C14); null means no 9 hole rounds.
+  price_9_cents?: number | null;
 }
 
 // Display order Mon to Sun, stored as JS day_of_week (0 = Sunday).
@@ -119,6 +123,13 @@ export function groupLabel(group: CourtGroup, all: CourtGroup[], sportLabel: (s:
   return `${base} · ${mode}`;
 }
 
+// A golf course's tee sheet takes a 9 hole price per golfer next to the 18
+// hole one (C14). replace_venue_slot_templates refuses one on any group that
+// is not shared.
+export function offersNineHoles(group: Pick<CourtGroup, 'sport' | 'bookingMode'>): boolean {
+  return group.sport === 'golf' && group.bookingMode === 'shared';
+}
+
 export function defaultSlotMinutes(group: CourtGroup): number {
   for (const court of group.courts) {
     const model = slotModel(court);
@@ -131,7 +142,7 @@ export function defaultSlotMinutes(group: CourtGroup): number {
 export function emptyWeek(slotMinutes: number): Week {
   const week: Week = {};
   for (const { dow } of DAYS) {
-    week[dow] = { enabled: false, open: '09:00', close: '20:00', slotMinutes, price: '1500' };
+    week[dow] = { enabled: false, open: '09:00', close: '20:00', slotMinutes, price: '1500', price9: '' };
   }
   return week;
 }
@@ -151,6 +162,7 @@ export function seedWeek(group: CourtGroup, templates: ScheduleTemplate[]): Week
       close: t.end_time.slice(0, 5),
       slotMinutes: t.slot_minutes,
       price: String(Math.round(t.price_cents / 100)),
+      price9: t.price_9_cents == null ? '' : String(Math.round(t.price_9_cents / 100)),
     };
   }
   return week;
@@ -165,9 +177,12 @@ function minutesOf(hhmm: string): number {
 }
 
 // Validates the whole week first (same rules as the RPC), then builds the
-// payload. Nothing is sent unless every enabled day is valid.
+// payload. Nothing is sent unless every enabled day is valid. ninePrice (a
+// golf tee sheet, see offersNineHoles) adds each day's price_9_cents; other
+// groups never send one.
 export function buildTemplatePayload(
   week: Week,
+  { ninePrice = false }: { ninePrice?: boolean } = {},
 ): { ok: true; templates: TemplateInput[] } | { ok: false; error: string } {
   const templates: TemplateInput[] = [];
   for (const { dow, label } of DAYS) {
@@ -184,13 +199,31 @@ export function buildTemplatePayload(
     if (day.slotMinutes > span) return { ok: false, error: `${label}: slot length is longer than the opening hours.` };
     if (!/^\d+$/.test(day.price)) return { ok: false, error: `${label}: enter a price (0 for free).` };
     if (Number(day.price) * 100 > MAX_PRICE_CENTS) return { ok: false, error: `${label}: price is too high.` };
-    templates.push({
+    const template: TemplateInput = {
       day_of_week: dow,
       start_time: day.open,
       end_time: day.close,
       slot_minutes: day.slotMinutes,
       price_cents: Number(day.price) * 100,
-    });
+    };
+    if (ninePrice) {
+      const p9 = day.price9 ?? '';
+      if (p9 !== '' && !/^\d+$/.test(p9)) {
+        return { ok: false, error: `${label}: enter a 9 hole price, or leave it blank to offer 18 holes only.` };
+      }
+      if (p9 !== '' && Number(p9) * 100 > MAX_PRICE_CENTS) return { ok: false, error: `${label}: 9 hole price is too high.` };
+      template.price_9_cents = p9 === '' ? null : Number(p9) * 100;
+    }
+    templates.push(template);
   }
   return { ok: true, templates };
+}
+
+// What the schedule editor saves for a group: the week's payload, with the 9
+// hole price only when the group is a golf tee sheet (offersNineHoles).
+export function schedulePayload(
+  group: Pick<CourtGroup, 'sport' | 'bookingMode'>,
+  week: Week,
+): ReturnType<typeof buildTemplatePayload> {
+  return buildTemplatePayload(week, { ninePrice: offersNineHoles(group) });
 }

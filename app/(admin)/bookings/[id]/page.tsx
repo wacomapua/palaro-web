@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { formatMoney, formatDateTime } from '@/lib/format';
 import { DEFAULT_TIMEZONE } from '@/lib/tz';
 import { computeRefund, formatRefundPolicy, resolveRefundPolicy } from '@/lib/refund';
+import { bookingHolesLabel, partyLabel } from '@/lib/tee-sheet';
 import type { RefundPolicy, VenueBooking } from '@/lib/types/db';
 
 type BookingWithJoins = VenueBooking & {
@@ -22,6 +23,7 @@ type BookingWithJoins = VenueBooking & {
     starts_at: string;
     ends_at: string;
     refund_policy: RefundPolicy | null;
+    booking_mode: string | null;
     court: { name: string } | null;
   } | null;
   captain: { display_name: string | null; phone: string | null; email: string | null } | null;
@@ -45,7 +47,7 @@ export default async function BookingDetail({
       .select(`
         *,
         venue:venues(name, currency, default_refund_policy, timezone),
-        slot:venue_slots(starts_at, ends_at, refund_policy, court:venue_courts(name)),
+        slot:venue_slots(starts_at, ends_at, refund_policy, booking_mode, court:venue_courts(name)),
         captain:profiles!captain_user_id(display_name, phone, email)
       `)
       .eq('id', id)
@@ -70,6 +72,8 @@ export default async function BookingDetail({
     venue.default_refund_policy,
   );
   const refund = computeRefund(booking.total_cents, slot.starts_at, policy);
+  // Golf tee time bookings: the round the golfer chose (C14).
+  const holes = bookingHolesLabel({ holes: booking.holes, bookingMode: slot.booking_mode });
 
   return (
     <div className="px-8 py-8 max-w-3xl">
@@ -110,7 +114,11 @@ export default async function BookingDetail({
           <CardContent className="grid gap-2 text-sm">
             <Row label="Venue" value={venue.name} />
             <Row label="Court" value={slot.court.name} />
-            <Row label="Players" value={String(booking.party_size ?? 1)} />
+            <Row
+              label={holes ? 'Golfers' : 'Players'}
+              value={holes ? `${booking.party_size ?? 1} (${partyLabel(booking.party_size ?? 1)})` : String(booking.party_size ?? 1)}
+            />
+            {holes && <Row label="Holes" value={holes} />}
             <Row label="Start" value={formatDateTime(slot.starts_at, tz)} />
             <Row label="End" value={formatDateTime(slot.ends_at, tz)} />
           </CardContent>
