@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
 import { VenueForm } from '@/app/onboarding/venue/form';
 
 export default async function VenueSettings() {
@@ -9,14 +10,27 @@ export default async function VenueSettings() {
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const { data: venue } = await supabase
-    .from('venues')
-    .select('id, name, sport, address, city, phone, description')
-    .eq('owner_id', user.id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const venue = dataOrThrow(
+    await supabase
+      .from('venues')
+      .select('id, name, sport, address, city, phone, description, timezone')
+      .eq('owner_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    'venue',
+  );
   if (!venue) redirect('/onboarding/profile');
+
+  const { data: offered } = await supabase
+    .from('venue_sports')
+    .select('sport')
+    .eq('venue_id', venue.id)
+    .eq('active', true);
+  const sports = [
+    venue.sport,
+    ...(offered ?? []).map((o) => o.sport).filter((s) => s !== venue.sport),
+  ];
 
   return (
     <div className="px-8 py-8 max-w-2xl">
@@ -29,6 +43,8 @@ export default async function VenueSettings() {
             id: venue.id,
             name: venue.name,
             sport: venue.sport,
+            sports,
+            timezone: venue.timezone,
             address: venue.address,
             city: venue.city ?? '',
             phone: venue.phone ?? '',

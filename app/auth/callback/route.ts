@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import type { EmailOtpType } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
+import { publicOrigin } from '@/lib/public-origin';
 
 // Handles BOTH Supabase auth-link styles:
 //   - OAuth / PKCE:        ?code=…
@@ -8,7 +10,9 @@ import { createClient } from '@/lib/supabase/server';
 // Default email templates use the OTP form; OAuth providers use the code form.
 // We accept either so the same redirect URL works for both.
 export async function GET(request: Request) {
-  const { searchParams, origin } = new URL(request.url);
+  const { searchParams } = new URL(request.url);
+  // Public origin, not the internal proxy bind address — see publicOrigin().
+  const origin = publicOrigin(request);
   const code = searchParams.get('code');
   const tokenHash = searchParams.get('token_hash');
   const type = searchParams.get('type') as EmailOtpType | null;
@@ -37,11 +41,14 @@ export async function GET(request: Request) {
     data: { user },
   } = await supabase.auth.getUser();
   if (user) {
-    const { data: venues } = await supabase
-      .from('venues')
-      .select('id')
-      .eq('owner_id', user.id)
-      .limit(1);
+    const venues = dataOrThrow(
+      await supabase
+        .from('venues')
+        .select('id')
+        .eq('owner_id', user.id)
+        .limit(1),
+      'venues',
+    );
     if (!venues || venues.length === 0) {
       return NextResponse.redirect(`${origin}/onboarding/profile`);
     }

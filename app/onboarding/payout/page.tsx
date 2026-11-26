@@ -1,4 +1,5 @@
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
 import { redirect } from 'next/navigation';
 import { PayoutForm } from './form';
 
@@ -9,13 +10,16 @@ export default async function PayoutStep() {
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const { data: venue } = await supabase
-    .from('venues')
-    .select('id, name, payout_method')
-    .eq('owner_id', user.id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const venue = dataOrThrow(
+    await supabase
+      .from('venues')
+      .select('id, name, payout_method')
+      .eq('owner_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    'venue',
+  );
 
   if (!venue) redirect('/onboarding/venue');
 

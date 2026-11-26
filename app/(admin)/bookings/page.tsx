@@ -1,9 +1,26 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { formatMoney, formatDateTime } from '@/lib/format';
+import { DEFAULT_TIMEZONE } from '@/lib/tz';
+import { bookingHolesLabel } from '@/lib/tee-sheet';
+import type { VenueBooking } from '@/lib/types/db';
+
+type BookingRow = Pick<
+  VenueBooking,
+  'id' | 'status' | 'total_cents' | 'payout_cents' | 'created_at' | 'party_size' | 'holes'
+> & {
+  slot: {
+    starts_at: string;
+    ends_at: string;
+    booking_mode: string | null;
+    court: { name: string } | null;
+  } | null;
+  captain: { display_name: string | null; phone: string | null; email: string | null } | null;
+};
 
 export default async function BookingsPage() {
   const supabase = await createClient();
@@ -12,25 +29,38 @@ export default async function BookingsPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const { data: venue } = await supabase
-    .from('venues')
-    .select('id, currency')
-    .eq('owner_id', user.id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const venue = dataOrThrow(
+    await supabase
+      .from('venues')
+      .select('id, currency, timezone')
+      .eq('owner_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    'venue',
+  );
   if (!venue) redirect('/onboarding/profile');
+  const tz = venue.timezone || DEFAULT_TIMEZONE;
 
-  const { data: bookings } = await supabase
-    .from('venue_bookings')
-    .select(`
-      id, status, total_cents, payout_cents, created_at,
-      slot:venue_slots(starts_at, ends_at, court:venue_courts(name)),
-      captain:profiles!captain_user_id(display_name, phone, email)
-    `)
-    .eq('venue_id', venue.id)
-    .order('created_at', { ascending: false })
-    .limit(100);
+  // Throws on failure (dataOrThrow) so a missing column (holes before
+  // 20260601000001) shows an error, not an empty bookings list.
+  const bookingsRaw = dataOrThrow(
+    await supabase
+      .from('venue_bookings')
+      .select(`
+        id, status, total_cents, payout_cents, created_at, party_size, holes,
+        slot:venue_slots(starts_at, ends_at, booking_mode, court:venue_courts(name)),
+        captain:profiles!captain_user_id(display_name, phone, email)
+      `)
+      .eq('venue_id', venue.id)
+      .order('created_at', { ascending: false })
+      .limit(100),
+    'bookings',
+  );
+  const bookings = bookingsRaw as unknown as BookingRow[] | null;
+  // Golf tee time bookings carry the round the golfer chose (C14).
+  const holesFor = (b: BookingRow) => bookingHolesLabel({ holes: b.holes, bookingMode: b.slot?.booking_mode });
+  const showHoles = (bookings ?? []).some((b) => holesFor(b) !== null);
 
   return (
     <div className="px-8 py-8">
@@ -52,6 +82,8 @@ export default async function BookingsPage() {
                   <th className="py-2">When played</th>
                   <th>Court</th>
                   <th>Captain</th>
+                  <th className="text-right">Players</th>
+                  {showHoles && <th className="text-right">Holes</th>}
                   <th className="text-right">Total</th>
                   <th className="text-right">Your cut</th>
                   <th className="text-right">Status</th>
@@ -63,7 +95,7 @@ export default async function BookingsPage() {
                     <td className="py-2.5 font-mono tnum text-[12px]">
                       {/* deno-lint-ignore no-explicit-any */}
                       {(b as any).slot?.starts_at
-                        ? formatDateTime((b as any).slot.starts_at)
+                        ? formatDateTime((b as any).slot.starts_at, tz)
                         : '—'}
                     </td>
                     {/* deno-lint-ignore no-explicit-any */}
@@ -77,6 +109,10 @@ export default async function BookingsPage() {
                         {(b as any).captain?.display_name ?? '—'}
                       </Link>
                     </td>
+                    <td className="text-right font-mono tnum text-ink-dim">{b.party_size ?? 1}</td>
+                    {showHoles && (
+                      <td className="text-right font-mono tnum text-ink-dim">{holesFor(b)}</td>
+                    )}
                     <td className="text-right font-mono tnum">
                       {formatMoney(b.total_cents, venue.currency)}
                     </td>

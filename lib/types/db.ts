@@ -16,9 +16,26 @@ export type TxnType =
   | 'venue_payout'
   | 'venue_refund';
 
-export type VenueSport = 'football' | 'basketball' | 'tennis' | 'pickleball' | 'volleyball';
+export type VenueSport =
+  | 'football'
+  | 'basketball'
+  | 'tennis'
+  | 'pickleball'
+  | 'volleyball'
+  | 'golf'
+  | 'badminton'
+  | 'swimming'
+  | 'squash';
 export type VenueStatus = 'pending_review' | 'active' | 'suspended';
 export type VenueSlotStatus = 'available' | 'held' | 'booked' | 'cancelled' | 'closed';
+// How a slot is consumed:
+//  - 'exclusive': one booking owns the whole slot (court sports)
+//  - 'shared':    multiple bookings share it up to max_players (golf tee times)
+export type BookingMode = 'exclusive' | 'shared';
+// How a slot is priced:
+//  - 'per_slot':   price_cents is the total for the slot
+//  - 'per_player': price_per_player_cents is charged per player in the party
+export type PricingMode = 'per_slot' | 'per_player';
 export type VenueBookingStatus =
   | 'pending_payment'
   | 'paid'
@@ -26,8 +43,10 @@ export type VenueBookingStatus =
   | 'refunded'
   | 'completed';
 export type VenuePayoutStatus = 'pending' | 'paid' | 'failed';
+// A golf round (venue_bookings.holes).
+export type GolfHoles = 9 | 18;
 
-export interface Profile {
+export type Profile = {
   id: string;
   phone: string | null;
   email: string | null;
@@ -36,16 +55,16 @@ export interface Profile {
   created_at: string;
 }
 
-export interface RefundTier {
+export type RefundTier = {
   hours_before: number;
   refund_pct: number;
 }
 
-export interface RefundPolicy {
+export type RefundPolicy = {
   tiers: RefundTier[];
 }
 
-export interface PayoutMethod {
+export type PayoutMethod = {
   method: 'gcash' | 'bank';
   gcash_number?: string;
   bank_name?: string;
@@ -53,10 +72,12 @@ export interface PayoutMethod {
   account_name?: string;
 }
 
-export interface Venue {
+export type Venue = {
   id: string;
   slug: string;
   name: string;
+  // The venue's primary/default sport. The full set a venue offers lives in
+  // venue_sports (a venue can run many sports across its courts).
   sport: VenueSport;
   address: string;
   city: string | null;
@@ -68,16 +89,30 @@ export interface Venue {
   owner_id: string;
   status: VenueStatus;
   currency: string;
+  // IANA timezone the venue operates in (e.g. 'Asia/Manila'). All slot day/time
+  // math is anchored to this, not the server or browser timezone.
+  timezone: string;
   payout_method: PayoutMethod | null;
   default_refund_policy: RefundPolicy;
   created_at: string;
   updated_at: string;
 }
 
-export interface VenueCourt {
+export type VenueSportOffering = {
+  id: string;
+  venue_id: string;
+  sport: VenueSport;
+  active: boolean;
+  created_at: string;
+}
+
+export type VenueCourt = {
   id: string;
   venue_id: string;
   parent_court_id: string | null;
+  // Which sport this court belongs to (a multi-sport venue has courts spanning
+  // several sports). Backfilled from the venue's primary sport on migration.
+  sport: VenueSport;
   name: string;
   kind: string | null;
   sort_order: number;
@@ -87,15 +122,27 @@ export interface VenueCourt {
   created_at: string;
 }
 
-export interface VenueSlot {
+export type VenueSlot = {
   id: string;
   venue_id: string;
   court_id: string;
   starts_at: string;
   ends_at: string;
   price_cents: number;
+  // Per-player price, used when pricing_mode = 'per_player' (e.g. golf tee times).
+  // On a golf tee time this is the 18 hole price.
+  price_per_player_cents: number | null;
+  // Per golfer 9 hole price on a golf tee time; null means 9 hole rounds are
+  // not offered on it (C14).
+  price_per_player_9_cents: number | null;
   currency: string;
   status: VenueSlotStatus;
+  // 'exclusive' (court sports) or 'shared' (golf tee times, up to max_players).
+  booking_mode: BookingMode;
+  pricing_mode: PricingMode;
+  // For shared slots: max players across all bookings (e.g. 4 for a foursome).
+  // null for exclusive slots (capacity is the court's capacity).
+  max_players: number | null;
   refund_policy: RefundPolicy | null;
   held_until: string | null;
   generated_from_template_id: string | null;
@@ -103,13 +150,19 @@ export interface VenueSlot {
   created_at: string;
 }
 
-export interface VenueBooking {
+export type VenueBooking = {
   id: string;
   slot_id: string;
   venue_id: string;
   team_id: string | null;
   captain_user_id: string;
   event_id: string | null;
+  // Number of players this booking brings. For shared (golf) slots the sum of
+  // party_size across active bookings must not exceed slot.max_players.
+  party_size: number;
+  // Holes booked (C14). Golf tee times: 9 or 18 as the golfer chose. Every
+  // other booking stores 18.
+  holes: GolfHoles;
   total_cents: number;
   platform_fee_cents: number;
   payout_cents: number;
@@ -118,13 +171,62 @@ export interface VenueBooking {
   refund_amount_cents: number;
   refund_reason: string | null;
   refunded_at: string | null;
+  // Policy in force when the booking was made (owner decision 1). null only
+  // on bookings cancelled before the column existed.
+  refund_policy_snapshot: RefundPolicy | null;
   payout_id: string | null;
   metadata: Json | null;
   created_at: string;
   updated_at: string;
 }
 
-export interface VenuePayout {
+export type VenueSlotTemplate = {
+  id: string;
+  venue_id: string;
+  court_id: string;
+  day_of_week: number; // 0 = Sunday … 6 = Saturday
+  start_time: string; // 'HH:MM:SS'
+  end_time: string;
+  slot_minutes: number;
+  price_cents: number;
+  // Shared (golf) groups only: per golfer 9 hole price copied onto generated
+  // tee times; null means no 9 hole rounds.
+  price_9_cents: number | null;
+  refund_policy: RefundPolicy | null;
+  active: boolean;
+  paused_until: string | null;
+  created_at: string;
+}
+
+export type VenueClosure = {
+  id: string;
+  venue_id: string;
+  court_id: string | null; // null = whole venue
+  starts_at: string;
+  ends_at: string;
+  reason: string | null;
+  created_at: string;
+}
+
+// Refund queue (C1). Rows are written by definer functions (closures, late
+// payments) and sent by the payments-process-refunds edge function.
+export type VenueRefundReason = 'venue_closure' | 'late_payment' | 'player_cancel';
+export type VenueRefundStatus = 'pending' | 'processing' | 'succeeded' | 'failed';
+
+export type VenueRefund = {
+  id: string;
+  booking_id: string;
+  amount_cents: number;
+  reason: VenueRefundReason;
+  status: VenueRefundStatus;
+  paymongo_refund_id: string | null;
+  last_error: string | null;
+  attempts: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type VenuePayout = {
   id: string;
   venue_id: string;
   period_start: string;
@@ -141,9 +243,9 @@ export interface VenuePayout {
 }
 
 type TableShape<R> = {
-  Row: R;
-  Insert: Record<string, unknown>;
-  Update: Record<string, unknown>;
+  Row: R & Record<string, unknown>;
+  Insert: Partial<R> & Record<string, unknown>;
+  Update: Partial<R> & Record<string, unknown>;
   Relationships: [];
 };
 
@@ -152,13 +254,40 @@ export type Database = {
     Tables: {
       profiles: TableShape<Profile>;
       venues: TableShape<Venue>;
+      venue_sports: TableShape<VenueSportOffering>;
       venue_courts: TableShape<VenueCourt>;
       venue_slots: TableShape<VenueSlot>;
+      venue_slot_templates: TableShape<VenueSlotTemplate>;
+      venue_closures: TableShape<VenueClosure>;
       venue_bookings: TableShape<VenueBooking>;
       venue_payouts: TableShape<VenuePayout>;
+      venue_refunds: TableShape<VenueRefund>;
     };
     Views: Record<string, never>;
-    Functions: Record<string, never>;
+    Functions: {
+      generate_venue_slots: {
+        Args: { _venue_id: string; _through: string };
+        Returns: number;
+      };
+      replace_venue_slot_templates: {
+        Args: { _venue_id: string; _sport: VenueSport; _booking_mode: BookingMode; _templates: Json };
+        Returns: number;
+      };
+      create_venue_closure: {
+        Args: {
+          _venue_id: string;
+          _court_id: string | null;
+          _starts_at: string;
+          _ends_at: string;
+          _reason: string | null;
+        };
+        Returns: { closure_id: string; closed_slot_count: number; refunded_booking_ids: string[] }[];
+      };
+      swap_venue_court_sort_order: {
+        Args: { _court_id: string; _other_court_id: string };
+        Returns: undefined;
+      };
+    };
     Enums: Record<string, never>;
   };
 };

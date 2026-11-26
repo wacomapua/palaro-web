@@ -1,10 +1,12 @@
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { formatMoney, formatDateTime } from '@/lib/format';
+import { DEFAULT_TIMEZONE } from '@/lib/tz';
 
 export default async function SlotsPage() {
   const supabase = await createClient();
@@ -13,17 +15,29 @@ export default async function SlotsPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const { data: venue } = await supabase
-    .from('venues')
-    .select('id, name, currency')
-    .eq('owner_id', user.id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const venue = dataOrThrow(
+    await supabase
+      .from('venues')
+      .select('id, name, currency, timezone')
+      .eq('owner_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    'venue',
+  );
   if (!venue) redirect('/onboarding/profile');
 
+  const tz = venue.timezone || DEFAULT_TIMEZONE;
   const now = new Date().toISOString();
-  const { data: slots } = await supabase
+  type SlotRow = {
+    id: string;
+    starts_at: string;
+    ends_at: string;
+    price_cents: number;
+    status: 'available' | 'held' | 'booked' | 'cancelled' | 'closed';
+    court: { name: string } | null;
+  };
+  const { data: slotsRaw } = await supabase
     .from('venue_slots')
     .select(`
       id, starts_at, ends_at, price_cents, status,
@@ -33,6 +47,7 @@ export default async function SlotsPage() {
     .gte('starts_at', now)
     .order('starts_at')
     .limit(50);
+  const slots = slotsRaw as unknown as SlotRow[] | null;
 
   return (
     <div className="px-8 py-8">
@@ -68,7 +83,7 @@ export default async function SlotsPage() {
                 {slots.map((s) => (
                   <tr key={s.id} className="border-b border-line/30">
                     <td className="py-2.5 font-mono tnum text-[12px]">
-                      {formatDateTime(s.starts_at)}
+                      {formatDateTime(s.starts_at, tz)}
                     </td>
                     {/* deno-lint-ignore no-explicit-any */}
                     <td>{(s as any).court?.name ?? '—'}</td>

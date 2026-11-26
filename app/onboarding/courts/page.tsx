@@ -1,4 +1,5 @@
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
 import { redirect } from 'next/navigation';
 import { CourtsBuilder } from './builder';
 
@@ -9,15 +10,29 @@ export default async function CourtsStep() {
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const { data: venue } = await supabase
-    .from('venues')
-    .select('id, name, sport')
-    .eq('owner_id', user.id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const venue = dataOrThrow(
+    await supabase
+      .from('venues')
+      .select('id, name, sport')
+      .eq('owner_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    'venue',
+  );
 
   if (!venue) redirect('/onboarding/venue');
+
+  const { data: offered } = await supabase
+    .from('venue_sports')
+    .select('sport')
+    .eq('venue_id', venue.id)
+    .eq('active', true);
+  // Primary sport first, then any other offered sports.
+  const sports = [
+    venue.sport,
+    ...(offered ?? []).map((o) => o.sport).filter((s) => s !== venue.sport),
+  ];
 
   const { data: existingCourts } = await supabase
     .from('venue_courts')
@@ -35,7 +50,7 @@ export default async function CourtsStep() {
       <div className="mt-6">
         <CourtsBuilder
           venueId={venue.id}
-          venueSport={venue.sport}
+          sports={sports}
           existingCourts={existingCourts ?? []}
         />
       </div>

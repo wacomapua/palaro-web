@@ -7,31 +7,142 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { createClient } from '@/lib/supabase/client';
-import { formatMoney, formatDateTime } from '@/lib/format';
-import type { VenueCourt, VenueSlot } from '@/lib/types/db';
+import { formatMoney } from '@/lib/format';
+import { formatRefundPolicy, normalizeTiers } from '@/lib/refund';
+import { RefundPolicyEditor } from '@/components/refund-policy-editor';
+import { zonedTimeToUtc, tzParts, formatTimeInTz, formatYmd } from '@/lib/tz';
+import { courtSlotModel, type CourtSlotModel } from '@/lib/sport-presets';
+import {
+  MAX_PLAYERS_PER_TEE_TIME,
+  centsToPriceText,
+  clampPlayersPerTeeTime,
+  holesLabel,
+  optionalPriceTextToCents,
+  priceTextToCents,
+  slotWriteColumns,
+  teeSheetRows,
+} from '@/lib/tee-sheet';
+import type { RefundPolicy, VenueCourt, VenueSlot } from '@/lib/types/db';
+
+// "HH:MM" wall-clock time on a venue-local day → UTC instant.
+function localTimeToUtc(dayYmd: string, hhmm: string, tz: string): Date {
+  const [y, mo, d] = dayYmd.split('-').map(Number);
+  const [h, m] = hhmm.split(':').map(Number);
+  return zonedTimeToUtc(y, mo, d, h, m, tz);
+}
+
+function hhmm(totalMinutes: number): string {
+  const t = Math.max(0, Math.min(totalMinutes, 23 * 60 + 59));
+  return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+}
+
+// HH:MM of a slot timestamp as seen in the venue timezone.
+function slotHHMM(iso: string, tz: string): string {
+  const p = tzParts(new Date(iso), tz);
+  return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`;
+}
 
 type Editing =
   | { kind: 'new'; courtId: string; hour: number }
   | { kind: 'edit'; slotId: string };
 
+interface SlotBooking {
+  id: string;
+  status: string;
+  party_size: number;
+  holes?: number | null;
+  captain: { display_name: string | null } | null;
+}
+
+// Digits only, no leading zeros.
+function digits(text: string): string {
+  return text.replace(/[^0-9]/g, '').replace(/^0+(?=\d)/, '');
+}
+
+// 18 hole and optional 9 hole price per golfer, side by side.
+function TeePriceFields({
+  price18,
+  price9,
+  onPrice18,
+  onPrice9,
+}: {
+  price18: string;
+  price9: string;
+  onPrice18: (v: string) => void;
+  onPrice9: (v: string) => void;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-4">
+      <div className="space-y-1.5">
+        <Label htmlFor="price">18 holes, per golfer</Label>
+        <div className="flex items-center gap-2">
+          <span className="text-ink-dim font-mono">₱</span>
+          <Input
+            id="price"
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            value={price18}
+            onChange={(e) => onPrice18(digits(e.target.value))}
+            onBlur={() => price18 === '' && onPrice18('0')}
+            placeholder="1500"
+          />
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="price9">
+          9 holes, per golfer <span className="font-normal text-ink-mute">(optional)</span>
+        </Label>
+        <div className="flex items-center gap-2">
+          <span className="text-ink-dim font-mono">₱</span>
+          <Input
+            id="price9"
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            value={price9}
+            onChange={(e) => onPrice9(digits(e.target.value))}
+            placeholder="Not offered"
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function teePriceHint(price18Cents: number, price9Cents: number | null, players: number, currency: string): string {
+  const nine =
+    price9Cents === null
+      ? 'No 9 hole price, so golfers can book 18 holes only.'
+      : `9 holes is ${formatMoney(price9Cents, currency)} per golfer.`;
+  return `A full ${players}-ball of 18 holes brings ${formatMoney(price18Cents * players, currency)}; you net ${formatMoney(
+    Math.round(price18Cents * players * 0.95),
+    currency,
+  )} after the 5% platform fee. ${nine}`;
+}
+
 export function SlotEditSheet({
   venueId,
   editing,
-  date,
+  dayYmd,
+  timezone,
   courts,
   existingSlot,
-  existingBooking,
+  existingBookings,
   currency,
+  venueDefaultPolicy,
   onClose,
   onSaved,
 }: {
   venueId: string;
   editing: Editing;
-  date: Date;
+  dayYmd: string;
+  timezone: string;
   courts: VenueCourt[];
   existingSlot: VenueSlot | null;
-  existingBooking: { id: string; status: string; captain: { display_name: string | null } | null } | null;
+  existingBookings: SlotBooking[];
   currency: string;
+  venueDefaultPolicy: RefundPolicy;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -42,35 +153,279 @@ export function SlotEditSheet({
       ? courts.find((c) => c.id === existingSlot.court_id)
       : null;
 
-  // Default to 2-hour blocks; venue can override.
-  const initialStart = isNew
-    ? new Date(date.getFullYear(), date.getMonth(), date.getDate(), editing.hour, 0)
-    : new Date(existingSlot!.starts_at);
-  const initialEnd = isNew
-    ? new Date(initialStart.getTime() + 2 * 3_600_000)
-    : new Date(existingSlot!.ends_at);
+  const model = courtSlotModel(court);
+  const isTee = model.bookingMode === 'shared' && !!model.teeIntervalMinutes;
 
-  const [startTime, setStartTime] = useState(toLocalTime(initialStart));
-  const [endTime, setEndTime] = useState(toLocalTime(initialEnd));
-  // Track the price as the literal string the user is typing, so backspace
-  // and edits behave the way a text field should. We derive cents from it
-  // when saving — this avoids the type=number controlled-input weirdness
-  // (leading zeros, hard-to-clear digits).
-  const [priceText, setPriceText] = useState<string>(
-    String(Math.round((existingSlot?.price_cents ?? 200_000) / 100)),
+  if (isTee && isNew && court) {
+    return (
+      <TeeSheetGenerator
+        venueId={venueId}
+        court={court}
+        model={model}
+        dayYmd={dayYmd}
+        timezone={timezone}
+        editing={editing as { kind: 'new'; courtId: string; hour: number }}
+        currency={currency}
+        onClose={onClose}
+        onSaved={onSaved}
+      />
+    );
+  }
+
+  return (
+    <SingleSlotEditor
+      venueId={venueId}
+      court={court ?? null}
+      model={model}
+      dayYmd={dayYmd}
+      timezone={timezone}
+      editing={editing}
+      existingSlot={existingSlot}
+      existingBookings={existingBookings}
+      currency={currency}
+      venueDefaultPolicy={venueDefaultPolicy}
+      onClose={onClose}
+      onSaved={onSaved}
+    />
   );
-  const priceCents = Math.max(0, Math.round((Number(priceText) || 0) * 100));
+}
+
+// ---------------------------------------------------------------------------
+// Tee-sheet generator: bulk-create back-to-back tee times for a golf course.
+// ---------------------------------------------------------------------------
+function TeeSheetGenerator({
+  venueId,
+  court,
+  model,
+  dayYmd,
+  timezone,
+  editing,
+  currency,
+  onClose,
+  onSaved,
+}: {
+  venueId: string;
+  court: VenueCourt;
+  model: CourtSlotModel;
+  dayYmd: string;
+  timezone: string;
+  editing: { kind: 'new'; courtId: string; hour: number };
+  currency: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [startTime, setStartTime] = useState(`${String(editing.hour).padStart(2, '0')}:00`);
+  const [endTime, setEndTime] = useState(`${String(Math.min(editing.hour + 4, 23)).padStart(2, '0')}:00`);
+  const [interval, setInterval] = useState<number>(model.teeIntervalMinutes ?? 10);
+  const [maxPlayers, setMaxPlayers] = useState<number>(clampPlayersPerTeeTime(model.maxPlayers ?? MAX_PLAYERS_PER_TEE_TIME));
+  const [priceText, setPriceText] = useState<string>('1500'); // 18 holes, per golfer
+  const [price9Text, setPrice9Text] = useState<string>(''); // blank: 9 holes not offered
+  const pricePerPlayer = priceTextToCents(priceText);
+  const price9PerPlayer = optionalPriceTextToCents(price9Text);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const starts = localTimeToUtc(dayYmd, startTime, timezone);
+  const ends = localTimeToUtc(dayYmd, endTime, timezone);
+  const teeTimes = enumerateTeeTimes(starts, ends, interval);
+
+  async function generate() {
+    if (teeTimes.length === 0) {
+      setError('End time must be after start, with at least one interval between.');
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+
+    const rows = teeSheetRows({
+      venueId,
+      courtId: court.id,
+      currency,
+      teeTimes,
+      intervalMinutes: interval,
+      priceCents: pricePerPlayer,
+      price9Cents: price9PerPlayer,
+      maxPlayers,
+    });
+
+    const supabase = createClient();
+    const { error: insErr } = await supabase.from('venue_slots').insert(rows);
+    if (insErr) {
+      setError(insErr.message);
+      setSubmitting(false);
+      return;
+    }
+    setSubmitting(false);
+    onSaved();
+  }
+
+  return (
+    <Sheet open onOpenChange={(o) => !o && onClose()}>
+      <SheetContent>
+        <SheetHeader>
+          <SheetTitle>Generate tee sheet</SheetTitle>
+          <SheetDescription>
+            {court.name} · {formatYmd(dayYmd)}
+          </SheetDescription>
+        </SheetHeader>
+
+        <div className="space-y-5 px-6 pb-6">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="start">First tee-off</Label>
+              <Input id="start" type="time" step={300} value={startTime} onChange={(e) => setStartTime(e.target.value)} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="end">Last tee-off before</Label>
+              <Input id="end" type="time" step={300} value={endTime} onChange={(e) => setEndTime(e.target.value)} />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="interval">Interval (min)</Label>
+              <Input
+                id="interval"
+                type="number"
+                min={5}
+                max={20}
+                value={interval}
+                onChange={(e) => setInterval(Math.max(5, Number(e.target.value) || 10))}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="max">Players per tee time</Label>
+              <Input
+                id="max"
+                type="number"
+                min={1}
+                max={MAX_PLAYERS_PER_TEE_TIME}
+                value={maxPlayers}
+                onChange={(e) => setMaxPlayers(clampPlayersPerTeeTime(parseInt(e.target.value, 10)))}
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <TeePriceFields
+              price18={priceText}
+              price9={price9Text}
+              onPrice18={setPriceText}
+              onPrice9={setPrice9Text}
+            />
+            <p className="text-xs text-ink-mute">
+              {teePriceHint(pricePerPlayer, price9PerPlayer, maxPlayers, currency)}
+            </p>
+          </div>
+
+          <div className="rounded-md border border-line/60 bg-bg-2/50 p-3 text-sm">
+            <span className="font-mono text-ink">{teeTimes.length}</span> tee times will be created
+            {teeTimes.length > 0 && (
+              <span className="text-ink-dim">
+                {' '}
+                ({formatTimeInTz(teeTimes[0], timezone)} →{' '}
+                {formatTimeInTz(teeTimes[teeTimes.length - 1], timezone)})
+              </span>
+            )}
+            .
+          </div>
+
+          {error && <p className="text-xs text-danger">{error}</p>}
+
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="ghost" onClick={onClose} disabled={submitting}>
+              Cancel
+            </Button>
+            <Button onClick={generate} disabled={submitting || teeTimes.length === 0}>
+              {submitting ? 'Generating…' : `Generate ${teeTimes.length} tee times`}
+            </Button>
+          </div>
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Single-slot editor: court-sport blocks AND editing one golf tee time.
+// ---------------------------------------------------------------------------
+function SingleSlotEditor({
+  venueId,
+  court,
+  model,
+  dayYmd,
+  timezone,
+  editing,
+  existingSlot,
+  existingBookings,
+  currency,
+  venueDefaultPolicy,
+  onClose,
+  onSaved,
+}: {
+  venueId: string;
+  court: VenueCourt | null;
+  model: CourtSlotModel;
+  dayYmd: string;
+  timezone: string;
+  editing: Editing;
+  existingSlot: VenueSlot | null;
+  existingBookings: SlotBooking[];
+  currency: string;
+  venueDefaultPolicy: RefundPolicy;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const isNew = editing.kind === 'new';
+  const perPlayer = existingSlot ? existingSlot.pricing_mode === 'per_player' : model.pricingMode === 'per_player';
+  const shared = existingSlot ? existingSlot.booking_mode === 'shared' : model.bookingMode === 'shared';
+
+  const durationMin = model.defaultDurationMinutes || 120;
+  // New slots seed from the clicked hour; existing slots from their own times
+  // (rendered in the venue timezone).
+  const clickedHour = editing.kind === 'new' ? editing.hour : 0;
+  const [startTime, setStartTime] = useState(
+    existingSlot ? slotHHMM(existingSlot.starts_at, timezone) : hhmm(clickedHour * 60),
+  );
+  const [endTime, setEndTime] = useState(
+    existingSlot
+      ? slotHHMM(existingSlot.ends_at, timezone)
+      : hhmm(clickedHour * 60 + durationMin),
+  );
+
+  const seedPrice = perPlayer
+    ? existingSlot?.price_per_player_cents ?? existingSlot?.price_cents ?? 150_000
+    : existingSlot?.price_cents ?? 200_000;
+  const [priceText, setPriceText] = useState<string>(String(Math.round(seedPrice / 100)));
+  const priceCents = priceTextToCents(priceText);
+  // Golf tee times (shared, per golfer): optional 9 hole price, blank = not offered.
+  const teePricing = shared && perPlayer;
+  const [price9Text, setPrice9Text] = useState<string>(centsToPriceText(existingSlot?.price_per_player_9_cents));
+  const price9Cents = optionalPriceTextToCents(price9Text);
+  const [maxPlayers, setMaxPlayers] = useState<number>(
+    existingSlot?.max_players ?? clampPlayersPerTeeTime(model.maxPlayers ?? MAX_PLAYERS_PER_TEE_TIME),
+  );
+
+  // Per-slot refund override. null = inherit the venue default policy.
+  const [refundOverride, setRefundOverride] = useState<RefundPolicy | null>(
+    existingSlot?.refund_policy ?? null,
+  );
+
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const bookedPlayers = existingBookings
+    .filter((b) => ['paid', 'pending_payment', 'completed'].includes(b.status))
+    .reduce((s, b) => s + (b.party_size ?? 1), 0);
+  const hasBookings = bookedPlayers > 0;
 
   async function save() {
     setSubmitting(true);
     setError(null);
 
     const supabase = createClient();
-    const dayMid = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-    const starts = mergeDateTime(dayMid, startTime);
-    const ends = mergeDateTime(dayMid, endTime);
+    const starts = localTimeToUtc(dayYmd, startTime, timezone);
+    const ends = localTimeToUtc(dayYmd, endTime, timezone);
 
     if (ends <= starts) {
       setError('End time must be after start time');
@@ -78,15 +433,28 @@ export function SlotEditSheet({
       return;
     }
 
+    // null persists as "inherit the venue default". book_venue_slot snapshots
+    // slot.refund_policy ?? venue default onto each new booking, so saving here
+    // never changes bookings already made.
+    const refundPolicyToSave: RefundPolicy | null = refundOverride
+      ? { tiers: normalizeTiers(refundOverride.tiers) }
+      : null;
+
+    // Prices and players per tee time, as lib/tee-sheet.ts decides them.
+    const written = slotWriteColumns({ shared, perPlayer, priceCents, price9Cents, maxPlayers });
+
     if (isNew && court) {
       const { error: insErr } = await supabase.from('venue_slots').insert({
         venue_id: venueId,
         court_id: court.id,
         starts_at: starts.toISOString(),
         ends_at: ends.toISOString(),
-        price_cents: priceCents,
+        ...written,
         currency,
         status: 'available',
+        booking_mode: shared ? 'shared' : 'exclusive',
+        pricing_mode: perPlayer ? 'per_player' : 'per_slot',
+        refund_policy: refundPolicyToSave,
       });
       if (insErr) {
         setError(insErr.message);
@@ -99,7 +467,8 @@ export function SlotEditSheet({
         .update({
           starts_at: starts.toISOString(),
           ends_at: ends.toISOString(),
-          price_cents: priceCents,
+          ...written,
+          refund_policy: refundPolicyToSave,
         })
         .eq('id', existingSlot.id);
       if (updErr) {
@@ -113,7 +482,7 @@ export function SlotEditSheet({
     onSaved();
   }
 
-  async function close() {
+  async function closeSlot() {
     if (!existingSlot) return;
     setSubmitting(true);
     const supabase = createClient();
@@ -133,23 +502,50 @@ export function SlotEditSheet({
     <Sheet open onOpenChange={(o) => !o && onClose()}>
       <SheetContent>
         <SheetHeader>
-          <SheetTitle>{isNew ? 'New slot' : 'Edit slot'}</SheetTitle>
+          <SheetTitle>{isNew ? 'New slot' : shared ? 'Tee time' : 'Edit slot'}</SheetTitle>
           <SheetDescription>
-            {court?.name ?? 'Court'} · {formatDateTime(date)}
+            {court?.name ?? 'Court'} · {formatYmd(dayYmd)}
           </SheetDescription>
         </SheetHeader>
 
         <div className="space-y-5 px-6 pb-6">
-          {existingBooking && (
+          {shared && !isNew && (
+            <div className="rounded-md border border-line/60 bg-bg-2/60 p-3">
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-ink-dim">Tee time fill</p>
+                <Badge tone={bookedPlayers >= maxPlayers ? 'brand' : bookedPlayers > 0 ? 'warn' : 'neutral'}>
+                  {bookedPlayers}/{maxPlayers} players
+                </Badge>
+              </div>
+              {existingBookings.length > 0 && (
+                <ul className="mt-2 space-y-1 text-sm">
+                  {existingBookings.map((b) => (
+                    <li key={b.id} className="flex items-center justify-between gap-3">
+                      <span className="truncate">{b.captain?.display_name ?? 'Player'}</span>
+                      <span className="whitespace-nowrap text-ink-dim">
+                        ×{b.party_size ?? 1}
+                        {teePricing && (
+                          <span className="ml-2 font-mono text-[12px]">{holesLabel(b.holes === 9 ? 9 : 18)}</span>
+                        )}
+                        {b.status === 'pending_payment' && <span className="ml-2 text-[11px] text-warn">unpaid</span>}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+          {!shared && existingBookings[0] && (
             <div className="rounded-md border border-line/60 bg-bg-2/60 p-3">
               <div className="flex items-center justify-between">
                 <p className="text-xs text-ink-dim">Booked by</p>
-                <Badge tone={existingBooking.status === 'paid' ? 'brand' : 'warn'} className="capitalize">
-                  {existingBooking.status.replace('_', ' ')}
+                <Badge tone={existingBookings[0].status === 'paid' ? 'brand' : 'warn'} className="capitalize">
+                  {existingBookings[0].status.replace('_', ' ')}
                 </Badge>
               </div>
               <p className="mt-1 text-sm font-medium">
-                {existingBooking.captain?.display_name ?? 'Captain'}
+                {existingBookings[0].captain?.display_name ?? 'Captain'}
               </p>
             </div>
           )}
@@ -157,28 +553,45 @@ export function SlotEditSheet({
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-1.5">
               <Label htmlFor="start">Start</Label>
-              <Input
-                id="start"
-                type="time"
-                step={300}
-                value={startTime}
-                onChange={(e) => setStartTime(e.target.value)}
-              />
+              <Input id="start" type="time" step={300} value={startTime} onChange={(e) => setStartTime(e.target.value)} />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="end">End</Label>
-              <Input
-                id="end"
-                type="time"
-                step={300}
-                value={endTime}
-                onChange={(e) => setEndTime(e.target.value)}
-              />
+              <Input id="end" type="time" step={300} value={endTime} onChange={(e) => setEndTime(e.target.value)} />
             </div>
           </div>
 
+          {shared && (
+            <div className="space-y-1.5">
+              <Label htmlFor="max">Players per tee time</Label>
+              <Input
+                id="max"
+                type="number"
+                min={Math.max(1, bookedPlayers)}
+                max={Math.max(MAX_PLAYERS_PER_TEE_TIME, bookedPlayers)}
+                value={maxPlayers}
+                onChange={(e) => setMaxPlayers(clampPlayersPerTeeTime(parseInt(e.target.value, 10), bookedPlayers))}
+                className="w-32"
+              />
+            </div>
+          )}
+
+          {teePricing ? (
+            <div className="space-y-1.5">
+              <TeePriceFields
+                price18={priceText}
+                price9={price9Text}
+                onPrice18={setPriceText}
+                onPrice9={setPrice9Text}
+              />
+              <p className="text-xs text-ink-mute">{teePriceHint(priceCents, price9Cents, maxPlayers, currency)}</p>
+              <p className="text-xs text-ink-mute">
+                Price changes apply to new bookings only; golfers already booked keep what they paid.
+              </p>
+            </div>
+          ) : (
           <div className="space-y-1.5">
-            <Label htmlFor="price">Price</Label>
+            <Label htmlFor="price">{perPlayer ? 'Price per golfer' : 'Price'}</Label>
             <div className="flex items-center gap-2">
               <span className="text-ink-dim font-mono">₱</span>
               <Input
@@ -187,29 +600,81 @@ export function SlotEditSheet({
                 inputMode="numeric"
                 pattern="[0-9]*"
                 value={priceText}
-                onChange={(e) => {
-                  // Strip non-digits and leading zeros (but allow "" while typing).
-                  const digits = e.target.value.replace(/[^0-9]/g, '');
-                  const cleaned = digits.replace(/^0+(?=\d)/, '');
-                  setPriceText(cleaned);
-                }}
-                onBlur={() => {
-                  if (priceText === '') setPriceText('0');
-                }}
-                placeholder="2000"
+                onChange={(e) => setPriceText(e.target.value.replace(/[^0-9]/g, '').replace(/^0+(?=\d)/, ''))}
+                onBlur={() => priceText === '' && setPriceText('0')}
+                placeholder={perPlayer ? '1500' : '2000'}
               />
             </div>
             <p className="text-xs text-ink-mute">
-              Captain pays {formatMoney(priceCents, currency)}; you net{' '}
-              {formatMoney(Math.round(priceCents * 0.95), currency)} after the 5% platform fee.
+              {perPlayer ? (
+                <>
+                  Each golfer pays {formatMoney(priceCents, currency)}; a full {maxPlayers}-ball nets
+                  you {formatMoney(Math.round(priceCents * maxPlayers * 0.95), currency)} after the 5%
+                  fee.
+                </>
+              ) : (
+                <>
+                  Captain pays {formatMoney(priceCents, currency)}; you net{' '}
+                  {formatMoney(Math.round(priceCents * 0.95), currency)} after the 5% platform fee.
+                </>
+              )}
             </p>
+          </div>
+          )}
+
+          <div className="space-y-2">
+            <label className="flex cursor-pointer items-center gap-2 text-sm text-ink">
+              <input
+                type="checkbox"
+                checked={refundOverride !== null}
+                onChange={(e) =>
+                  setRefundOverride(
+                    e.target.checked
+                      ? { tiers: normalizeTiers(refundOverride?.tiers ?? venueDefaultPolicy.tiers) }
+                      : null,
+                  )
+                }
+                className="h-4 w-4 accent-brand"
+              />
+              Override refund policy for this slot
+            </label>
+            <p className="text-xs text-ink-mute">
+              Changes apply to new bookings only. Bookings already made on this
+              slot keep the policy they were booked under.
+            </p>
+
+            {refundOverride !== null ? (
+              <div className="space-y-3 rounded-md border border-line/60 bg-bg-2/40 p-3">
+                <RefundPolicyEditor
+                  value={refundOverride}
+                  onChange={setRefundOverride}
+                  disabled={submitting}
+                />
+                <ul className="space-y-1 text-xs text-ink-dim">
+                  {formatRefundPolicy({ tiers: normalizeTiers(refundOverride.tiers) }).map(
+                    (line, i) => (
+                      <li key={i}>· {line}</li>
+                    ),
+                  )}
+                </ul>
+              </div>
+            ) : (
+              <div className="rounded-md border border-line/60 bg-bg-2/30 p-3 text-xs text-ink-mute">
+                Uses the venue default:
+                <ul className="mt-1 space-y-1">
+                  {formatRefundPolicy(venueDefaultPolicy).map((line, i) => (
+                    <li key={i}>· {line}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
 
           {error && <p className="text-xs text-danger">{error}</p>}
 
           <div className="flex justify-between gap-2 pt-2">
-            {!isNew && existingSlot?.status === 'available' && (
-              <Button variant="ghost" onClick={close} disabled={submitting}>
+            {!isNew && existingSlot?.status === 'available' && !hasBookings && (
+              <Button variant="ghost" onClick={closeSlot} disabled={submitting}>
                 Close slot
               </Button>
             )}
@@ -219,7 +684,7 @@ export function SlotEditSheet({
               </Button>
               <Button
                 onClick={save}
-                disabled={submitting || (!isNew && existingSlot?.status === 'booked')}
+                disabled={submitting || (!isNew && !shared && existingSlot?.status === 'booked')}
               >
                 {submitting ? 'Saving…' : 'Save slot'}
               </Button>
@@ -231,13 +696,15 @@ export function SlotEditSheet({
   );
 }
 
-function toLocalTime(d: Date): string {
-  return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
-}
-
-function mergeDateTime(day: Date, hhmm: string): Date {
-  const [h, m] = hhmm.split(':').map(Number);
-  const out = new Date(day);
-  out.setHours(h, m, 0, 0);
+function enumerateTeeTimes(start: Date, end: Date, intervalMin: number): Date[] {
+  const out: Date[] = [];
+  if (!(end > start) || intervalMin < 1) return out;
+  let t = new Date(start);
+  // Cap to avoid runaway inserts.
+  while (t < end && out.length < 200) {
+    out.push(new Date(t));
+    t = new Date(t.getTime() + intervalMin * 60_000);
+  }
   return out;
 }
+

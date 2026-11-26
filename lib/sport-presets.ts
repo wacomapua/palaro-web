@@ -3,7 +3,7 @@
 // starting point. After picking, they can rename / reorder / set capacity
 // before commit.
 
-import type { VenueSport } from '@/lib/types/db';
+import type { VenueSport, BookingMode, PricingMode, Json } from '@/lib/types/db';
 
 export interface PresetNode {
   // Stable id within the preset so we can reference parent in children.
@@ -11,7 +11,7 @@ export interface PresetNode {
   name: string;
   // Free-text kind that becomes venue_courts.kind. Drives some UI hints
   // (e.g. half-pitch icon vs quarter icon) but isn't enum-checked.
-  kind: 'pitch' | 'half' | 'quarter' | 'court' | 'derived';
+  kind: 'pitch' | 'half' | 'quarter' | 'court' | 'derived' | 'course' | 'lane';
   capacity?: number;
   parentKey?: string; // null = root
 }
@@ -24,6 +24,67 @@ export interface CourtPreset {
   nodes: PresetNode[];
   // For "N courts" presets: prompt the user for N before generating nodes.
   variableCount?: { min: number; max: number; default: number; namePattern: string };
+  // Booking model — defaults to exclusive / per_slot (i.e. "rent the whole
+  // court for one block"). Golf-style presets set bookingMode 'shared' with a
+  // tee interval so a single tee time holds several independent parties.
+  bookingMode?: BookingMode;
+  pricingMode?: PricingMode;
+  // Minutes between consecutive slots when bulk-generating. Presence of a
+  // teeIntervalMinutes signals a tee-sheet (golf): many short slots back to back.
+  teeIntervalMinutes?: number;
+  // Max players across all bookings of one shared slot (a golf foursome = 4).
+  maxPlayers?: number;
+}
+
+// The slot-generation model derived from a preset and stored on
+// venue_courts.metadata so the calendar knows how to create slots for a court
+// without re-deriving it from the sport every time.
+export interface CourtSlotModel {
+  bookingMode: BookingMode;
+  pricingMode: PricingMode;
+  defaultDurationMinutes: number;
+  teeIntervalMinutes?: number;
+  maxPlayers?: number;
+}
+
+export function slotModelForPreset(preset: CourtPreset): CourtSlotModel {
+  return {
+    bookingMode: preset.bookingMode ?? 'exclusive',
+    pricingMode: preset.pricingMode ?? 'per_slot',
+    defaultDurationMinutes: preset.defaultDurationMinutes,
+    teeIntervalMinutes: preset.teeIntervalMinutes,
+    maxPlayers: preset.maxPlayers,
+  };
+}
+
+// The slot model a court was built with, read from
+// venue_courts.metadata.slotModel (written by the court builder). Courts made
+// from presets that are no longer offered (driving range bays, Front 9 and
+// Back 9) keep the model stored on them. Older courts without one: a golf
+// course is a tee sheet, anything else is booked exclusively.
+export function courtSlotModel(
+  court: { sport: VenueSport; kind: string | null; metadata: Json | null } | null | undefined,
+): CourtSlotModel {
+  const raw = (court?.metadata as { slotModel?: Partial<CourtSlotModel> } | null)?.slotModel;
+  if (raw && raw.bookingMode) {
+    return {
+      bookingMode: raw.bookingMode,
+      pricingMode: raw.pricingMode ?? 'per_slot',
+      defaultDurationMinutes: raw.defaultDurationMinutes ?? 120,
+      teeIntervalMinutes: raw.teeIntervalMinutes,
+      maxPlayers: raw.maxPlayers,
+    };
+  }
+  if (court?.sport === 'golf' && court?.kind === 'course') {
+    return {
+      bookingMode: 'shared',
+      pricingMode: 'per_player',
+      defaultDurationMinutes: 10,
+      teeIntervalMinutes: 10,
+      maxPlayers: 4,
+    };
+  }
+  return { bookingMode: 'exclusive', pricingMode: 'per_slot', defaultDurationMinutes: 120 };
 }
 
 export interface SportConfig {
@@ -149,6 +210,80 @@ export const SPORT_CONFIGS: SportConfig[] = [
         defaultDurationMinutes: 120,
         nodes: [],
         variableCount: { min: 1, max: 12, default: 2, namePattern: 'Court {n}' },
+      },
+    ],
+  },
+  {
+    sport: 'golf',
+    emoji: '⛳',
+    label: 'Golf',
+    presets: [
+      {
+        // The only golf layout (owner decision C14): one tee sheet per course,
+        // no driving range bays and no Front 9 / Back 9 split. Courts made
+        // from the old presets keep working through their stored slotModel.
+        id: 'golf-18',
+        label: 'Golf course',
+        description:
+          'One tee sheet per course. Each tee time takes a single, twosome, threesome or foursome, paid per golfer. Golfers play 18 holes, or 9 holes when you set a 9 hole price.',
+        defaultDurationMinutes: 10,
+        bookingMode: 'shared',
+        pricingMode: 'per_player',
+        teeIntervalMinutes: 10,
+        maxPlayers: 4,
+        nodes: [{ key: 'course', name: 'Golf Course', kind: 'course', capacity: 4 }],
+      },
+    ],
+  },
+  {
+    sport: 'badminton',
+    emoji: '🏸',
+    label: 'Badminton',
+    presets: [
+      {
+        id: 'badminton-flat',
+        label: 'N courts',
+        description: 'Independent badminton courts.',
+        defaultDurationMinutes: 60,
+        nodes: [],
+        variableCount: { min: 1, max: 24, default: 4, namePattern: 'Court {n}' },
+      },
+    ],
+  },
+  {
+    sport: 'swimming',
+    emoji: '🏊',
+    label: 'Swimming',
+    presets: [
+      {
+        id: 'swimming-lanes',
+        label: 'N lap lanes',
+        description: 'Independent lap lanes, booked per lane for a time block.',
+        defaultDurationMinutes: 60,
+        nodes: [],
+        variableCount: { min: 1, max: 16, default: 6, namePattern: 'Lane {n}' },
+      },
+      {
+        id: 'swimming-pool',
+        label: 'Whole pool',
+        description: 'Reserve the entire pool as one resource.',
+        defaultDurationMinutes: 60,
+        nodes: [{ key: 'pool', name: 'Pool', kind: 'court', capacity: 30 }],
+      },
+    ],
+  },
+  {
+    sport: 'squash',
+    emoji: '🟦',
+    label: 'Squash',
+    presets: [
+      {
+        id: 'squash-flat',
+        label: 'N courts',
+        description: 'Independent squash courts.',
+        defaultDurationMinutes: 45,
+        nodes: [],
+        variableCount: { min: 1, max: 16, default: 4, namePattern: 'Court {n}' },
       },
     ],
   },

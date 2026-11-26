@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import { dataOrThrow } from '@/lib/query';
 import { OnboardingProgress, type Step } from './progress';
 
 export default async function OnboardingLayout({ children }: { children: React.ReactNode }) {
@@ -18,11 +19,14 @@ export default async function OnboardingLayout({ children }: { children: React.R
     .eq('id', user.id)
     .maybeSingle();
 
-  const { data: venues } = await supabase
-    .from('venues')
-    .select('id, name, sport, payout_method')
-    .eq('owner_id', user.id)
-    .order('created_at', { ascending: false });
+  const venues = dataOrThrow(
+    await supabase
+      .from('venues')
+      .select('id, name, sport, payout_method')
+      .eq('owner_id', user.id)
+      .order('created_at', { ascending: false }),
+    'venues',
+  );
 
   const venue = venues?.[0];
   const { data: courts } = venue
