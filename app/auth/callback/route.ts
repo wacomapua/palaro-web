@@ -3,6 +3,7 @@ import type { EmailOtpType } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/server';
 import { dataOrThrow } from '@/lib/query';
 import { publicOrigin } from '@/lib/public-origin';
+import { safeNext } from '@/lib/safe-next';
 
 // Handles BOTH Supabase auth-link styles:
 //   - OAuth / PKCE:        ?code=…
@@ -16,7 +17,7 @@ export async function GET(request: Request) {
   const code = searchParams.get('code');
   const tokenHash = searchParams.get('token_hash');
   const type = searchParams.get('type') as EmailOtpType | null;
-  const next = searchParams.get('next') ?? '/dashboard';
+  const next = safeNext(searchParams.get('next'));
 
   const supabase = await createClient();
 
