@@ -42,6 +42,22 @@ test('image optimizer allows nothing remote when the Supabase URL is unset', asy
   assert.deepEqual(config.images?.remotePatterns ?? [], []);
 });
 
+test('responses do not advertise Next.js and carry the baseline security headers', async () => {
+  const { default: config } = await import(`../next.config.ts?case=headers${Date.now()}`);
+  assert.equal(config.poweredByHeader, false, 'poweredByHeader should be false');
+  assert.equal(typeof config.headers, 'function', 'next.config has no headers()');
+
+  const rules = await config.headers();
+  const everyPath = rules.filter((r) => r.source === '/:path*');
+  assert.equal(everyPath.length, 1, 'expected one headers rule for every path');
+  const headers = Object.fromEntries(everyPath[0].headers.map((h) => [h.key, h.value]));
+  assert.deepEqual(headers, {
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'X-Frame-Options': 'DENY',
+  });
+});
+
 // The tests import next.config.ts directly, which needs Node's native type
 // stripping (on by default from 22.18). supabase-js also needs Node 22.
 test('package.json pins Node 22 at 22.18 or newer', async () => {
